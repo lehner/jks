@@ -2,4 +2,4 @@
 
 Install using
 
-> python3 -m pip install jks
+> python3 -m pip install jks-system
