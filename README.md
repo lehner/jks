@@ -1,4 +1,4 @@
-# JKS Measurement database system
+# JKS measurement database system
 [![DOI](https://zenodo.org/badge/881044249.svg)](https://doi.org/10.5281/zenodo.14017592)
 
 Install using
