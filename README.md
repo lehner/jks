@@ -10,8 +10,8 @@ You can cite usage of the system as
 ```
 @software{christoph_lehner_2024_14017593,
   author       = {Christoph Lehner},
-  title        = {JKS measurement database, 2024-10},
-  month        = oct,
+  title        = {{JKS measurement database, 2024-10}},
+  month        = 10,
   year         = 2024,
   publisher    = {Zenodo},
   version      = {2024-10},
