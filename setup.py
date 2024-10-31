@@ -1,10 +1,10 @@
 from setuptools import setup, find_packages
 import glob
 
-scripts = glob.glob("scripts/jks_*")
+scripts = glob.glob("scripts/*")
 
 setup(
-    name="jks",
+    name="jks-system",
     version="1.0.0",
     packages=find_packages(),  # Automatically find the packages in the project
     scripts=scripts,  # Include scripts as is
@@ -18,7 +18,7 @@ setup(
     url="https://github.com/lehner/jks",
     classifiers=[
         "Programming Language :: Python :: 3",
-        "License :: OSI Approved :: GPLv2",
+        "License :: OSI Approved :: GNU General Public License v2 (GPLv2)",
         "Operating System :: OS Independent",
     ],
     python_requires=">=3.6",
