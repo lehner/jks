@@ -1,0 +1,64 @@
+#!/usr/bin/env python3
+#
+#    JKS - Measurement database system
+#    Copyright (C) 2013-2024  Christoph Lehner (christoph.lehner@ur.de, https://github.com/lehner/jks)
+#
+#    This program is free software; you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation; either version 2 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License along
+#    with this program; if not, write to the Free Software Foundation, Inc.,
+#    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+#
+import jks, sys, os, math, glob
+if len(sys.argv) != 5:
+    print("%s fn etag ctag pat" % sys.argv[0])
+    sys.exit(0)
+
+fn=sys.argv[1]
+etag=sys.argv[2]
+ctag=sys.argv[3]
+pat=sys.argv[4]
+
+jks2=jks.resamples()
+
+fns=glob.glob(pat)
+
+idx=pat.index('*')
+fmt=pat.replace("*","%d")
+
+def get_tag(f):
+    if len(pat)-idx==1:
+        return f[idx:]
+    else:
+        return f[idx:-len(pat)+idx+1]
+
+# check that projecting config numbers to integers gives a unique mapping
+tags=[ int(get_tag(f)) for f in fns ]
+assert(len(list(set(tags))) == len(fns))
+
+def mm(ln,i):
+    a=list(filter(lambda x: x!="", ln.split(" ")))
+    assert(int(a[0])==i)
+    return float(a[1])
+
+def load(fn):
+    lns=list(filter(lambda x: x!="" and x[0]!="T",open(fn).read().split("\n")))
+    rows=len(lns[0].split(" "))
+    assert(rows >= 2)
+    return [ mm(lns[i],i) for i in range(len(lns)) ]
+
+m=jks.measurements(dict([ ("%s-%8.8d" % (etag,int(get_tag(f))),load(f)) for f in fns ]))
+jk=m.jackknife().prepare(lambda mi: mi.mean())
+jks2.add(ctag,jk)
+jks2.save(fn)
+
+
+

@@ -1,0 +1,42 @@
+#!/usr/bin/env python3
+#
+#    JKS - Measurement database system
+#    Copyright (C) 2013-2024  Christoph Lehner (christoph.lehner@ur.de, https://github.com/lehner/jks)
+#
+#    This program is free software; you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation; either version 2 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License along
+#    with this program; if not, write to the Free Software Foundation, Inc.,
+#    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+#
+import jks, sys, fnmatch
+if len(sys.argv) < 3:
+    print("%s database.jks pattern" % sys.argv[0])
+    sys.exit(1)
+
+fno=sys.argv[1]
+
+pat=sys.argv[2:]
+
+inp=jks.resamples(fno)
+out=jks.resamples()
+
+for k in inp.keys():
+    keep=True
+    for p in pat:
+        if fnmatch.fnmatch(k,p):
+            keep=False
+    if keep:
+        out.add(k,inp.get(k))
+
+#out.compress()
+out.save(fno)
+

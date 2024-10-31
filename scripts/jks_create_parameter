@@ -1,0 +1,44 @@
+#!/usr/bin/env python3
+#
+#    JKS - Measurement database system
+#    Copyright (C) 2013-2024  Christoph Lehner (christoph.lehner@ur.de, https://github.com/lehner/jks)
+#
+#    This program is free software; you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation; either version 2 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License along
+#    with this program; if not, write to the Free Software Foundation, Inc.,
+#    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+#
+import jks, sys, os
+n=len(sys.argv) - 2
+if n < 0 or n % 3 != 0:
+    print("%s output.jks pname pvalue1 perr1 [pvalue2 perr2 ...]" % sys.argv[0])
+    sys.exit(0)
+n=n//3
+
+fn=sys.argv[1]
+
+jks2=jks.resamples()
+
+for i in range(n):
+    tag=sys.argv[2+i*3]
+    val=float(sys.argv[3+i*3])
+    err=float(sys.argv[4+i*3])
+
+    jk=jks.measurements([ val ]).jackknife().prepare(lambda mi: mi.mean())
+    if err != 0.0:
+        jk=jk.addvar(tag,[ val + err ],"Parameter error from file %s" % os.path.abspath(fn))
+    jks2.add(tag,jk)
+
+jks2.save(fn)
+
+
+

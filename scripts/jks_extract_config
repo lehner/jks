@@ -1,0 +1,46 @@
+#!/usr/bin/env python3
+#
+#    JKS - Measurement database system
+#    Copyright (C) 2013-2024  Christoph Lehner (christoph.lehner@ur.de, https://github.com/lehner/jks)
+#
+#    This program is free software; you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation; either version 2 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License along
+#    with this program; if not, write to the Free Software Foundation, Inc.,
+#    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+#
+import jks, sys, os, math, glob, tempfile, subprocess, numpy
+from scipy.special import erf
+
+if len(sys.argv) < 4:
+    print("%s in.jks tag config" % sys.argv[0])
+    sys.exit(0)
+
+fin=sys.argv[1]
+tag=sys.argv[2]
+config=sys.argv[3]
+
+jks0=jks.resamples(fin)
+jks2=jks.resamples()
+jks2.take(jks0,tag)
+jks2.compress()
+
+jk=jks2.get(tag)
+m=jk.scaled_measurements()
+
+if config not in jk.tags:
+    print("%s not measured on %s" % (tag,config))
+    sys.exit(1)
+
+ic=jk.tags.index(config)
+r=m.data[ic]
+for t in range(len(r)):
+    print("%d %.15g %.15g" % (t,r[t].real,r[t].imag))

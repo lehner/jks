@@ -22,7 +22,7 @@ import sys, os, struct, binascii, fnmatch, numpy
 class writer:
     def __init__(self, fn):
         self.f = open(fn, "w+b")
-        
+
     def write(self, t, cc):
         if self.f is not None:
             self.f.write(struct.pack("i", len(t) + 1))
@@ -39,6 +39,7 @@ class writer:
         if self.f is not None:
             self.f.close()
             self.f = None
+
 
 def count(fn):
     n = 0
@@ -57,7 +58,7 @@ def count(fn):
     return n
 
 
-def tags(fn, filter = lambda x: x):
+def tags(fn, filter=lambda x: x):
     n = 0
     tags = []
     f = open(fn, "rb")
@@ -72,10 +73,10 @@ def tags(fn, filter = lambda x: x):
         data = f.read(16 * ln)
 
         crc32comp = binascii.crc32(data) & 0xFFFFFFFF
-        
+
         if crc32comp != crc32:
             raise Exception("Data corrupted!")
-        
+
         corr = numpy.frombuffer(data, dtype=numpy.complex128, count=ln)
 
         x = filter(tag, corr)
