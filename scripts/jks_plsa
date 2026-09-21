@@ -1,0 +1,221 @@
+#!/usr/bin/env python3
+#
+#    JKS - Measurement database system
+#    Copyright (C) 2013-2026  Christoph Lehner (christoph.lehner@ur.de, https://github.com/lehner/jks)
+#
+#    This program is free software; you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation; either version 2 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License along
+#    with this program; if not, write to the Free Software Foundation, Inc.,
+#    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+#
+import jks, sys, os, numpy as np
+if len(sys.argv) != 7:
+    print("%s database.jks tag_in list_of_weights_in list_of_weights_out omega_grid tag_out" % sys.argv[0])
+    print("")
+    print("- list_of_weights_X accepts a list of")
+    print("  a) in integer t for which exp(-t*omega) will be used as the spectral weight")
+    print("  b) a string tag to a weight")
+    print("")
+    print("- Note that an error on omega_grid is not propagated, use multiple omega_grid if needed")
+    print("")
+    print("- Control meta parameters via JKS_META=chi2_0,chi2_1,seed,n_facets,n_samples,warmup,conditional")
+    print("  conditional is the number of chunk points at which the exact conditional")
+    print("  range of each output is evaluated by LP; a few hundred suffices")
+
+    sys.exit(0)
+
+db, tag_in, list_w_in, list_w_out, omega_grid, tag_out = sys.argv[1:]
+
+res = jks.resamples(db)
+
+omega_grid = res.get(omega_grid).mean()
+
+print(f"Performing sampling using energy grid [{min(omega_grid)},..,{max(omega_grid)}] ({len(omega_grid)} resolution)")
+
+def process_weight_element(e, i):
+    if isinstance(e, int):
+        return np.exp(-e*omega_grid), e
+    elif isinstance(e, str):
+        ww = res.get(e).mean()
+        assert ww.shape == omega_grid.shape, f"{e} not found"
+        return ww, i
+    else:
+        assert False, "weight not found"
+
+def process_weight(w):
+    assert isinstance(w, list)
+    t = [process_weight_element(e, i) for i, e in enumerate(w)]
+    return [x[0] for x in t], [x[1] for x in t]
+
+list_w_in, sel_w_in = process_weight(eval(list_w_in))
+list_w_out, sel_w_out = process_weight(eval(list_w_out))
+
+list_w_in = np.asarray(list_w_in, float)
+list_w_out = np.asarray(list_w_out, float)
+
+# create a temporary version of c_in projected
+def get_c_in(r):
+    raw_in = r[tag_in]
+    return [ raw_in[s] for s in sel_w_in ]
+    
+c_in = res.apply(get_c_in)
+c_in_mn = c_in.mean()
+
+# TODO: for now just do uncorrelated / diagonal input
+c_in_cv = np.diag(np.array(c_in.cov()).diagonal())
+
+if "JKS_META" in os.environ:
+    meta = os.environ["JKS_META"]
+else:
+    meta = "1,2,0,1500,20000,4000,500"
+
+meta = meta.split(",")
+assert len(meta) == 7, "JKS_META takes 7 fields"
+chi2s0, chi2s1, seed, n_facets, n_samples, warmup, conditional = [int(x) for x in meta]
+
+chi2s = [chi2s0, chi2s1]
+
+print(f"""Meta parameters:
+ chi2s       = {chi2s}
+ seed        = {seed}
+ n_facets    = {n_facets}
+ n_samples   = {n_samples}
+ warmup      = {warmup}
+ conditional = {conditional}
+""")
+    
+# --- tension between the data and positivity ---------------------------------
+chi_min_in = jks.positive_laplace.min_chi(list_w_in, c_in_mn, c_in_cv, omega_grid,
+                                          floor=None, n_facets=n_facets, seed=0)
+# A nonzero chi_min is the NORMAL state, not a red flag: a correlator dominated by
+# its ground state sits close to the boundary of the moment cone (a single
+# exponential is an extreme ray of it), so an ordinary sub-sigma fluctuation of the
+# central value lands outside.  Drawing the central value from its own covariance
+# around an exactly representable correlator gives chi_min with median ~0.7 (m=4)
+# to ~1.1 (m=6) and 90th percentile ~1.1 to ~1.7.  What matters is not whether
+# chi_min > 0 but whether chi^2_min is comparable to the chi^2 being sampled: only
+# then is the admissible set a cap rather than a full ellipsoid over the range that
+# the two-point chi^2 split relies on.
+ratio_cap = chi_min_in ** 2 / min(chi2s)
+print(f"Positivity tension: chi_min = {chi_min_in:.4f}  (chi^2_min = {chi_min_in**2:.4f}, "
+      f"{ratio_cap:.1%} of chi2s min {min(chi2s)})")
+if chi_min_in == 0.0:
+    print(" the data are reproduced exactly by a positive spectrum on this grid")
+elif ratio_cap <= 0.1:
+    print(" small next to chi2s -- consistent with ordinary noise on the central value")
+else:
+    print(f" the data lie {chi_min_in:.3f} sigma outside the positive cone, so over the")
+    print(f" sampled range the admissible set is a spherical cap, not a full ellipsoid")
+    print(f"WARNING: chi^2_min = {chi_min_in**2:.4f} is not small next to chi2s = {chi2s}.")
+    print(f"  On a cap the sampled covariance is not affine in chi^2, so the two-point")
+    print(f"  statistical/systematic split is unreliable.  Raise chi2s well above {chi_min_in**2:.3f},")
+    print(f"  or check whether the tension is structural: if chi_min jumps when an input")
+    print(f"  time is added, the window cannot fit that time rather than it being noise.")
+print("")
+
+mn = {}
+cv = {}
+for chi2 in chi2s:
+    print(f"Sampling for chi^2 = {chi2}")
+    mn[chi2], cv[chi2], _ = jks.positive_laplace.sample_admissible(
+        list_w_in, c_in_mn, c_in_cv,
+        list_w_out, omega_grid,
+        chi=chi2**0.5, floor=None,
+        n_facets=n_facets,
+        n_samples=n_samples,
+        warmup=warmup,
+        seed=0, joint=True,
+        conditional_fibre=conditional
+    )
+
+# print(np.abs(mn[2] / mn[1] - 1), "noise")
+
+mn = mn[chi2s[0]]
+
+ii = len(list_w_in)
+io = len(list_w_out)
+assert len(mn) == ii + io
+mn_out = mn[ii:]
+
+# cv = chi^2 cv_stat + cv_sys
+# cv[a] = a cv_stat + cv_sys
+# cv[b] = b cv_stat + cv_sys
+# (cv[b] - cv[a]) / (b - a) = cv_stat
+# (cv[b] a - cv[a] b) / (a - b) = cv_sys
+
+def get_c_out(r, cor):
+    d_c_in = np.array(get_c_in(r)) - c_in_mn
+    d_c_out = d_c_in @ cor
+    return mn_out + d_c_out
+
+# per-input growth of the sampled c_S variance with chi^2; pure statistics gives
+# chi2s[1]/chi2s[0], positivity-clipped directions give much less
+chi2_ratio_in = (np.array(cv[chi2s[1]]).diagonal()[0:ii]
+                 / np.array(cv[chi2s[0]]).diagonal()[0:ii])
+
+cv_stat = (cv[chi2s[0]] - cv[chi2s[1]]) / (chi2s[0] - chi2s[1])
+cv_sys = (cv[chi2s[1]] * chi2s[0] - cv[chi2s[0]] * chi2s[1]) / (chi2s[0] - chi2s[1])
+
+def get_cor(cv):
+    cv_in_out = cv[0:ii, ii:(ii+io)]
+    cv_in = cv[0:ii, 0:ii]
+    # cv_stat is a difference of two sampled covariances.  When the c_S spread is
+    # set by positivity rather than by the data ellipsoid it barely grows with
+    # chi^2, the difference is then smaller than its own Monte-Carlo noise, and
+    # cv_in comes back indefinite -- whereupon **0.5 gives nan and silently poisons
+    # every output.  Report it and clamp rather than propagate nan.
+    dg = np.array(cv_in).diagonal()
+    ev = np.linalg.eigvalsh(cv_in)
+    if dg.min() <= 0.0 or ev.min() <= 0.0:
+        print(f"WARNING: the cv_stat input block is not positive definite "
+              f"(min diagonal {dg.min():.3e}, min eigenvalue {ev.min():.3e}) --")
+        print(f"  cv[{chi2s[0]}] and cv[{chi2s[1]}] differ by less than their sampling noise, so the")
+        print(f"  statistical/systematic split is undetermined.  Ratios cv[{chi2s[1]}]/cv[{chi2s[0]}] per input:")
+        print(f"    {np.array2string(chi2_ratio_in, precision=2)}"
+              f"  (pure statistics would give {chi2s[1]/chi2s[0]:.2f})")
+        print(f"  A ratio well below that means positivity, not the data ellipsoid, sets the")
+        print(f"  c_S spread.  Widen the chi2s separation or raise n_samples; clamping to proceed.")
+    # should rescale with ratio of plain jks error on input and (max - min) / 2 sample error for chi2=1
+    err_in = np.array(c_in_cv).diagonal() ** 0.5
+    err_in_ref = np.maximum(dg, 0.0) ** 0.5 * (3 ** 0.5)  # 3 comes from uniform versus gaussian variance
+    err_scale = np.diag(err_in_ref / err_in)
+    return err_scale @ np.linalg.pinv(cv_in) @ cv_in_out
+
+cor_in_out = get_cor(cv_stat)    
+jk = res.apply(lambda r: get_c_out(r, cor_in_out))
+
+# cv_sys is a cancelling combination of two sampled covariances, so a genuinely
+# zero systematic comes back as a small negative number and **0.5 would give nan.
+# Clamp at zero, and report the outputs where the negative part is too large to be
+# that cancellation noise (5% of the chi2s[0] variance) -- there cv(chi^2) is not
+# affine, which the two-point split silently assumes.
+bad = [i for i in range(len(mn_out))
+       if cv_sys[ii + i][ii + i] < -0.05 * abs(cv[chi2s[0]][ii + i][ii + i])]
+if bad:
+    a, b = chi2s
+    print(f"WARNING: cv_sys < 0 for {len(bad)} of {len(mn_out)} outputs "
+          f"{[sel_w_out[i] for i in bad]} -- clamped to 0.")
+    print(f"  cv(chi^2) is not affine here: cv[{b}] grows faster than {b}/{a}x cv[{a}],")
+    print(f"  so the chi^2 = {a}, {b} pair extrapolates to a negative intercept.  Either the")
+    print(f"  chains are unconverged (raise n_samples or conditional), or the data central value")
+    print(f"  lies outside the positive cone, making the low-chi^2 set a spherical cap that")
+    print(f"  grows faster than chi^2 -- in that case raise chi2s above the cap regime.")
+
+def sys_err(i):
+    return max(0.0, cv_sys[ii + i][ii + i]) ** 0.5
+
+jk = jk.addvar(tag_out, [mn_out[i] + sys_err(i) for i in range(len(mn_out))], "Systematic error from %s" % str(sys.argv))
+res.add(tag_out, jk)
+
+res.save(db)
+
+print("Done")

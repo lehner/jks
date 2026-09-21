@@ -1,0 +1,43 @@
+#!/usr/bin/env python3
+#
+#    JKS - Measurement database system
+#    Copyright (C) 2013-2024  Christoph Lehner (christoph.lehner@ur.de, https://github.com/lehner/jks)
+#
+#    This program is free software; you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation; either version 2 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License along
+#    with this program; if not, write to the Free Software Foundation, Inc.,
+#    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+#
+import jks, sys, os, math, glob
+if len(sys.argv) < 6:
+    print("%s inout otag etag c2tag Tmax" % sys.argv[0])
+    sys.exit(0)
+
+fno=sys.argv[1]
+otag=sys.argv[2]
+etag=sys.argv[3]
+c2tag=sys.argv[4]
+Tmax=int(sys.argv[5])
+
+res=jks.resamples(fno)
+
+def fnc(r,n):
+    return [ sum([ r[c2tag][i]*math.exp(-t*r[etag][i]) for i in range(n) ]) for t in range(Tmax) ]
+
+Nmax=len(res.get(etag).mean())
+
+for N in range(1,Nmax+1):
+    jk=res.apply(lambda r: fnc(r,N))
+    res.add("%s.rec%d" % (otag,N),jk)
+
+res.save(fno)
+

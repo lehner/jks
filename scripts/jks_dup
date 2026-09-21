@@ -1,0 +1,35 @@
+#!/usr/bin/env python
+#
+#    JKS - Measurement database system
+#    Copyright (C) 2013-2024  Christoph Lehner (christoph.lehner@ur.de, https://github.com/lehner/jks)
+#
+#    This program is free software; you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation; either version 2 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License along
+#    with this program; if not, write to the Free Software Foundation, Inc.,
+#    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+#
+import jks, sys, os, math, glob
+if len(sys.argv) < 5:
+    print "%s in itag out otag" % sys.argv[0]
+    sys.exit(0)
+
+fin=sys.argv[1]
+itag=sys.argv[2]
+fout=sys.argv[3]
+otag=sys.argv[4]
+
+jks2=jks.resamples(fin)
+res=jks.resamples()
+res.add(otag,jks2.get(itag))
+res.compress()
+res.save(fout)
+

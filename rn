@@ -1,0 +1,5 @@
+#!/bin/bash
+rm -rf dist/ build/ jks_system.egg-info
+~/jks_env/bin/python -m build
+~/jks_env/bin/twine check dist/*
+~/jks_env/bin/twine upload -u __token__ --verbose dist/*

@@ -1,0 +1,57 @@
+#!/bin/bash
+#
+#    JKS - Measurement database system
+#    Copyright (C) 2013-2024  Christoph Lehner (christoph.lehner@ur.de, https://github.com/lehner/jks)
+#
+#    This program is free software; you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation; either version 2 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License along
+#    with this program; if not, write to the Free Software Foundation, Inc.,
+#    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+#
+fin=$1
+fout=$2
+tmin=$3
+tmax=$4
+En1=$5
+
+# args
+nargs=$(($#-5))
+if ((nargs<=0))
+then
+echo "Run: fin fout tmin tmax En1 tag1 [tag2 ...]"
+fi
+
+# make temporary directory and cleanup code
+root=$(mktemp -d)
+function finish {
+  rm -rf $root
+}
+trap finish EXIT
+
+# action!
+for ((n=0;n<nargs;n++))
+do
+np=$((n+6))
+tag=${!np}
+
+guess=$(jks_info $fin $tag | egrep "^$tmin " | awk '{ print $2 }')
+echo "Fitting $tag from in range [$tmin,$tmax] with guess $guess"
+jks_fit $fin $tag "[ range(i,$tmax+1) for i in range($tmin,$tmax) ]" "p[0]*(1 + p[1]*math.exp(-($En1-p[0])*x))" "[$guess,0.5]" $root/ft.jks ft
+jks_op $root/t${n}.jks $tag "np.array([ float('nan') for j in range($tmin) ] + [ r['ft'][2*i] for i in range(len(r['ft'])/2) ])" $root/ft.jks
+jks_info $root/t${n}.jks $tag
+
+done
+
+jks_merge $fout $root/t*.jks
+
+
+

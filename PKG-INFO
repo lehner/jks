@@ -1,0 +1,46 @@
+Metadata-Version: 2.4
+Name: jks-system
+Version: 1.1.1
+Summary: JKS Measurement database system
+Home-page: https://github.com/lehner/jks
+Author: Christoph Lehner
+Author-email: christoph@lhnr.de
+Classifier: Programming Language :: Python :: 3
+Classifier: License :: OSI Approved :: GNU General Public License v2 (GPLv2)
+Classifier: Operating System :: OS Independent
+Requires-Python: >=3.6
+Description-Content-Type: text/markdown
+Requires-Dist: scipy
+Requires-Dist: lz4
+Requires-Dist: numpy
+Dynamic: author
+Dynamic: author-email
+Dynamic: classifier
+Dynamic: description
+Dynamic: description-content-type
+Dynamic: home-page
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary
+
+# JKS measurement database system
+[![DOI](https://zenodo.org/badge/881044249.svg)](https://doi.org/10.5281/zenodo.14017592)
+
+Install using
+
+> python3 -m pip install jks-system
+
+# Citation
+You can cite usage of the system as
+```
+@software{christoph_lehner_2024_14017593,
+  author       = {Christoph Lehner},
+  title        = {{JKS measurement database, 2024-10}},
+  month        = 10,
+  year         = 2024,
+  publisher    = {Zenodo},
+  version      = {2024-10},
+  doi          = {10.5281/zenodo.14017593},
+  url          = {https://doi.org/10.5281/zenodo.14017593}
+}
+```

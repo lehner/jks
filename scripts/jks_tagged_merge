@@ -1,0 +1,43 @@
+#!/usr/bin/env python3
+#
+#    JKS - Measurement database system
+#    Copyright (C) 2013-2024  Christoph Lehner (christoph.lehner@ur.de, https://github.com/lehner/jks)
+#
+#    This program is free software; you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation; either version 2 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License along
+#    with this program; if not, write to the Free Software Foundation, Inc.,
+#    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+#
+import jks, sys, os, math, glob
+if len(sys.argv) < 4 or len(sys.argv) % 2 != 0:
+    print("%s out tag1 in1 [tag2 in2 tag3 in3 ...]" % sys.argv[0])
+    sys.exit(0)
+
+
+fno=sys.argv[1]
+
+res=jks.resamples()
+
+N=len(sys.argv[2:])//2
+
+for i in range(N):
+    tag=sys.argv[2 + 2*i]
+    fn=sys.argv[3 + 2*i]
+    jks2=jks.resamples(fn)
+    print("Adding %d tagged as %s from %s" % (len(jks2.keys()),tag,fn))
+    for n in jks2.set:
+        res.add("%s/%s" % (tag,n),jks2.get(n))
+
+#if "JKS_NO_COMPRESS" not in os.environ:
+#   res.compress()
+
+res.save(fno)
