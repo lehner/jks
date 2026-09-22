@@ -100,7 +100,7 @@ if "JKS_COVARIANCE_ADDITION" in os.environ:
     c_in_cv += np.eye(c_in_cv.shape[0]) * float(os.environ["JKS_COVARIANCE_ADDITION"])
 evs, _ = np.linalg.eig(c_in_cv)
 evs = sorted(evs.real)
-kappa = evs[0] / evs[-1]
+kappa = evs[-1] / evs[0]
 print(f"Covariance condition number: {kappa:e}")
 assert kappa < 1e10, f"Problematic condition number of covariance {kappa}"
 
