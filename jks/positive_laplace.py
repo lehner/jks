@@ -53,10 +53,44 @@ _UNBOUNDED = highspy.HighsModelStatus.kUnbounded
 # numpy.  The slope  M = d(m_k)/dC_s = 1/2 (nrm_v_hi - nrm_v_lo)  (envelope
 # theorem) gives the statistical propagation:  central(c) = m + M (c - C_s).
 #
-# Prototype restriction:  E_S > 0 entrywise (Laplace-type data weights).  The
-# total-weight cap 1^T z <= W (needed for unbounded sets when E_S has
-# zero/negative entries) is then redundant: the recession cone of
-# {z >= 0 : E_S z = c} is {0}.
+# For GENERAL data weights E_S (sign-changing, zero columns) the admissible
+# set { z >= 0 : (E_S z - C_s)^T Sigma_s^{-1} (E_S z - C_s) <= chi^2 } can be
+# unbounded: its recession cone is { d >= 0 : E_S d = 0 }.  A target weight k
+# is then bounded on the set iff  k.d = 0  for every cone direction d --
+# checked by one small LP per side (below).  Bounded outputs are solved by the
+# same dual as the positive-E_S case (no total-weight cap needed: the cap only
+# compactifies, it does not change bounded optima); unbounded ones are reported
+# as one-sided infinite bands, which is the honest answer (the old sampler
+# replaced them with arbitrary W-cap-dependent finite numbers).
+
+def _cone_unbounded(E_eq, k, tol):
+    """(hi_unbounded, lo_unbounded) for  max/min k.z over { z >= 0 : E z = 0 }.
+    E_eq is column-equilibrated; the test LP is  max (k*rs).d'  s.t.
+    E_eq d' = 0,  d' in the simplex  (d = rs o d' maps back to original units,
+    so the optimum is in k-units).  infeasible <=> cone = {0} <=> bounded."""
+    m, K = E_eq.shape
+    I32 = np.arange(K, dtype=np.int32)
+
+    def probe(kd):
+        h = highspy.Highs()
+        h.silent()
+        h.setOptionValue("threads", 1)
+        for j in range(K):
+            h.addVariable(0.0, 1.0, 0.0)
+        for i in range(m):
+            h.addRow(0.0, 0.0, K, I32, np.ascontiguousarray(E_eq[i], np.float64))
+        h.addRow(1.0, 1.0, K, I32, np.ascontiguousarray(np.ones(K), np.float64))
+        h.changeColsCost(K, I32, np.ascontiguousarray(-kd, np.float64))
+        h.run()
+        st = h.getModelStatus()
+        if st == _INFEASIBLE:
+            return False
+        if st != _OPTIMAL:
+            return None
+        d = np.asarray(h.getSolution().col_value, np.float64)
+        return float(kd @ d) > tol
+
+    return probe(k), probe(-k)
 # --------------------------------------------------------------------------- #
 
 def _dual_bound_one(E_eq, C_s, Lc, chi, rhs, box0, maxit=200, tol=1e-9,
@@ -168,14 +202,23 @@ def positivity_bounds(E_s, C_s, Sigma_s, kernel, omega_grid, chi,
 
         lo[j], hi[j]   min/max of  kernel[j].z  over
                       { z >= 0 : (E_s z - C_s)^T Sigma_s^{-1} (E_s z - C_s) <= chi^2 }
-                      (rigorous outer approximation: each endpoint carries a
-                      one-sided safety margin of  viol * |C_s|_1 * nrm)
+                      (rigorous: each finite endpoint carries a one-sided safety
+                      margin of  viol * (|C_s|_1 + chi*||Lc||_F);  an endpoint is
+                      +-inf when kernel[j] is unbounded on the set, i.e. when the
+                      recession cone {d >= 0 : E_s d = 0} carries kernel[j] --
+                      see info['status'])
         M[j]           d (lo[j]+hi[j])/2 / d C_s   (m-vector; the statistical
                       propagation matrix, from the certificates, exact by the
-                      envelope theorem)
+                      envelope theorem;  nan for unbounded outputs)
         info           dict with per-output status / violation / cut counts
+                      (status: ok, zero_kernel, unbounded_hi, unbounded_lo,
+                      unbounded, or a solver failure string)
 
-    Prototype restriction: E_s must be strictly positive entrywise."""
+    E_s may have sign-changing entries; a grid node that no data weight sees
+    (a zero column) carries invisible weight, which makes every kernel with a
+    nonzero entry there unbounded -- reported, not capped.  Kernel entries
+    below 1e-9 * max|kernel| are zeroed before solving (they are at the
+    boundedness tolerance)."""
     omega_grid = np.asarray(omega_grid, float)
     E_S, E_L = np.asarray(E_s, float), np.asarray(kernel, float)
     K = len(omega_grid)
@@ -187,10 +230,8 @@ def positivity_bounds(E_s, C_s, Sigma_s, kernel, omega_grid, chi,
         keep = omega_grid >= float(floor)
         omega_grid, E_S, E_L = omega_grid[keep], E_S[:, keep], E_L[:, keep]
         K = len(omega_grid)
-    if not (E_S > 0).all():
-        raise NotImplementedError(
-            "positivity_bounds (prototype) requires E_s > 0 entrywise; the "
-            "total-weight-cap extension for general weights is not implemented yet")
+    if not (np.isfinite(E_S).all() and np.isfinite(E_L).all()):
+        raise ValueError("E_s and kernel must be finite (got NaN/inf entries)")
     c_data = np.asarray(C_s, float).ravel()
     m, p = E_S.shape[0], E_L.shape[0]
     if c_data.shape[0] != m:
@@ -204,7 +245,8 @@ def positivity_bounds(E_s, C_s, Sigma_s, kernel, omega_grid, chi,
     except np.linalg.LinAlgError:
         Lc = np.linalg.cholesky(Sig + 1e-12 * np.trace(Sig) / m * np.eye(m))
 
-    rs = 1.0 / E_S.max(0)                    # column equilibration (E_S > 0)
+    colmax = np.abs(E_S).max(0)                # sign-aware column equilibration
+    rs = np.where(colmax > 0.0, 1.0 / np.maximum(colmax, 1e-300), 1.0)
     E_eq = E_S * rs[None, :]
 
     lo = np.empty(p); hi = np.empty(p); M = np.empty((p, m))
@@ -219,27 +261,55 @@ def positivity_bounds(E_s, C_s, Sigma_s, kernel, omega_grid, chi,
             M[j] = 0.0
             status.append("zero_kernel"); viols.append(0.0); ncuts.append(0)
             continue
-        box0 = 8.0 / nrm                     # v ~ O(1/nrm)
-        phi_h, v_h, st_h, nc_h = _dual_bound_one(
-            E_eq, c_data, Lc, float(chi), rs * k / nrm, box0, maxit, tol)
-        phi_l, v_l, st_l, nc_l = _dual_bound_one(
-            E_eq, c_data, Lc, float(chi), -rs * k / nrm, box0, maxit, tol)
-        if st_h != "ok" or st_l != "ok":
+        k = k.copy()
+        k[np.abs(k) <= 1e-9 * nrm] = 0.0     # at the boundedness tolerance
+        ub_hi, ub_lo = _cone_unbounded(E_eq, k * rs, 1e-9 * nrm)
+        if ub_hi is None or ub_lo is None:   # cone LP itself failed
             lo[j] = hi[j] = np.nan
             M[j] = np.nan
-            status.append(st_h if st_h != "ok" else st_l)
+            status.append("cone_lp_failed"); viols.append(np.nan); ncuts.append(-1)
+            continue
+        box0 = 8.0 / nrm                     # v ~ O(1/nrm)
+        if ub_hi:
+            hi[j] = np.inf
+            phi_h, v_h, st_h, nc_h = (None, None, "unbounded", 0)
+        else:
+            phi_h, v_h, st_h, nc_h = _dual_bound_one(
+                E_eq, c_data, Lc, float(chi), rs * k / nrm, box0, maxit, tol)
+        if ub_lo:
+            lo[j] = -np.inf
+            phi_l, v_l, st_l, nc_l = (None, None, "unbounded", 0)
+        else:
+            phi_l, v_l, st_l, nc_l = _dual_bound_one(
+                E_eq, c_data, Lc, float(chi), -rs * k / nrm, box0, maxit, tol)
+        if (not ub_hi and st_h != "ok") or (not ub_lo and st_l != "ok"):
+            lo[j] = hi[j] = np.nan
+            M[j] = np.nan
+            status.append(st_h if (not ub_hi and st_h != "ok") else st_l)
             viols.append(np.nan); ncuts.append(-1)
             continue
         # certificate check in ORIGINAL units: u = nrm v must satisfy E^T u >= +/- k
-        u_h = nrm * v_h
-        u_l = nrm * v_l
-        viol = max(float(np.maximum(0.0, k - E_S.T @ u_h).max()),
-                   float(np.maximum(0.0, -k - E_S.T @ u_l).max()))
+        # (only for the finite sides)
+        viol = 0.0
+        if not ub_hi:
+            u_h = nrm * v_h
+            viol = max(viol, float(np.maximum(0.0, k - E_S.T @ u_h).max()))
+        if not ub_lo:
+            u_l = nrm * v_l
+            viol = max(viol, float(np.maximum(0.0, -k - E_S.T @ u_l).max()))
         margin = viol * cmargin              # one-sided safety on each endpoint
-        hi[j] = nrm * phi_h + margin
-        lo[j] = -nrm * phi_l - margin
-        M[j] = 0.5 * nrm * (v_h - v_l)
-        status.append("ok"); viols.append(viol / nrm)
+        if not ub_hi:
+            hi[j] = nrm * phi_h + margin
+        if not ub_lo:
+            lo[j] = -nrm * phi_l - margin
+        if ub_hi or ub_lo:
+            M[j] = np.nan                    # no finite midpoint slope
+            status.append("unbounded" if (ub_hi and ub_lo)
+                          else ("unbounded_hi" if ub_hi else "unbounded_lo"))
+        else:
+            M[j] = 0.5 * nrm * (v_h - v_l)
+            status.append("ok")
+        viols.append(viol / nrm)
         ncuts.append(nc_h + nc_l)
     info = dict(status=status, violation_rel=viols, ncuts=ncuts)
     return lo, hi, M, info

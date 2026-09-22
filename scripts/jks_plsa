@@ -128,11 +128,20 @@ lo, hi, M, info = jks.positive_laplace.positivity_bounds(
 t1 = time.time()
 io = len(list_w_out)
 
-bad = [j for j in range(io) if info["status"][j] != "ok"]
+bad = [j for j in range(io) if info["status"][j] not in ("ok", "zero_kernel")]
 if bad:
     for j in bad:
-        print(f"WARNING: output {sel_w_out[j]}: dual status {info['status'][j]} (no band)")
-    print("  (chi below chi_min or a numerically diverged certificate; raise chi2)")
+        st = info["status"][j]
+        if st in ("unbounded_hi", "unbounded_lo", "unbounded"):
+            print(f"ERROR: output weight {sel_w_out[j]!r} is UNBOUNDED under positivity "
+                  f"(status {st}): the data weights leave a free direction in the "
+                  f"spectrum (a grid node no input weight sees, or input weights that "
+                  f"cancel on part of the grid) and this output weight is nonzero along it.")
+        else:
+            print(f"ERROR: output weight {sel_w_out[j]!r}: dual status {st} (no band) -- "
+                  f"raise chi2 (chi_min={chi_min_in:.3f}) or check the inputs.")
+    print("  Refusing to store non-finite values in the database.")
+    sys.exit(1)
 central = 0.5 * (lo + hi)
 half = 0.5 * (hi - lo)
 # 1-sigma statistical error of the central value:  sqrt( (M S M^T)_jj )
