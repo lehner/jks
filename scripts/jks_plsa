@@ -142,9 +142,17 @@ if bad:
 central = 0.5 * (lo + hi)
 half = 0.5 * (hi - lo)
 
-print(f"Admissible range computed in {t1 - t0:.2f} s (max certificate violation "
-      f"{max(v for v in info['violation_rel'] if v == v):.1e} relative)")
+print(f"Admissible range computed in {t1 - t0:.2f} s (max primal-dual gap "
+      f"{max(v for v in info['gap_rel'] if v == v):.1e} relative)")
 print("")
+
+# full slope of the band center for the linearised fallback below.  M is the
+# slope at FIXED chi; the record chi of a resample moves with it through
+# chi_min, chi_r^2 = chi_min^2 + dchi2, with  d chi_r/dC = Sigma^-1 (C - E z*)/chi_r.
+# Without that term M overstates the resample spread by up to ~7x on
+# extrapolated outputs.
+dchi_r = solver.Li.T @ (solver.Li @ (np.asarray(c_in_mn, float) - solver.E_S @ z_ml)) / chi_r
+M_tot = M + np.outer(info["dcenter_dchi"], dchi_r)
 
 # --- store -------------------------------------------------------------------
 # central = band midpoint; stat blocks = the EXACT band center at each jackknife
@@ -178,7 +186,7 @@ def get_c_out(r):
     if ok.all():
         return m_r
     holder["fallback"] += int((~ok).sum())
-    return np.where(ok, m_r, central + M @ (c_r - c_mn))   # linearised fallback
+    return np.where(ok, m_r, central + M_tot @ (c_r - c_mn))   # linearised fallback
 
 t0 = time.time()
 jk = res.apply(get_c_out)
