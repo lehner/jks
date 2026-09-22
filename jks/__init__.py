@@ -22,6 +22,7 @@ from jks.measurements import measurements, jackknife
 from jks.fit import fit
 import jks.corrIO
 import jks.positive_laplace
+import jks.bounded_laplace
 
 def qfit(
     mn,
