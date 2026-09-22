@@ -103,12 +103,9 @@ def _cone_unbounded(E_eq, k, tol):
 # --------------------------------------------------------------------------- #
 
 
-def _face(A, a, aa, chi, ks, T):
-    """Closed-form optimum of  max ks.z  s.t. ||A z - a|| <= chi  with z
-    supported on T (sign of z_T not imposed).  Returns (z_T, w) or None if
-    the face is rank deficient or cannot reach the chi ball."""
-    if not T:                                      # z = 0, if admissible
-        return (np.zeros(0), np.zeros(A.shape[0])) if aa <= chi * chi else None
+def _face_setup(A, a, aa, chi, T):
+    """The ks-independent part of _face: (A_T, column norms, R, rho, z0), or
+    None if the face is rank deficient or cannot reach the chi ball."""
     AT = A[:, T]
     cn = np.linalg.norm(AT, axis=0)                # equilibrate the columns
     Q, R = np.linalg.qr(AT / cn)
@@ -119,23 +116,41 @@ def _face(A, a, aa, chi, ks, T):
     rho2 = chi * chi - (aa - qa @ qa)
     if rho2 <= 0.0:
         return None
-    rho = np.sqrt(rho2)
+    return AT, cn, R, np.sqrt(rho2), np.linalg.solve(R, qa)
+
+
+def _face(A, a, aa, chi, ks, T, fc):
+    """Closed-form optimum of  max ks.z  s.t. ||A z - a|| <= chi  with z
+    supported on T (sign of z_T not imposed).  Returns (z_T, w) or None if
+    the face is rank deficient or cannot reach the chi ball.
+    `fc` caches _face_setup per support T; it is valid for one (a, chi) only
+    and is shared by all target weights and both sides, which revisit the
+    same few supports."""
+    if not T:                                      # z = 0, if admissible
+        return (np.zeros(0), np.zeros(A.shape[0])) if aa <= chi * chi else None
+    key = tuple(T)
+    if key not in fc:
+        fc[key] = _face_setup(A, a, aa, chi, T)
+    f = fc[key]
+    if f is None:
+        return None
+    AT, cn, R, rho, z0 = f
     y = np.linalg.solve(R.T, ks[T] / cn)
     ny = np.linalg.norm(y)
     if ny == 0.0:
         return None
-    zT = (np.linalg.solve(R, qa) + np.linalg.solve(R, y) * (rho / ny)) / cn
+    zT = (z0 + np.linalg.solve(R, y) * (rho / ny)) / cn
     return zT, (ny / rho) * (AT @ zT - a)
 
 
-def _restricted(A, a, aa, chi, ks, S, vtol):
+def _restricted(A, a, aa, chi, ks, S, vtol, fc):
     """Exact optimum of the problem restricted to z_S >= 0: the first face T
     of S (largest first) that satisfies the KKT conditions on S."""
     m = A.shape[0]
     AS = A[:, S]
     for size in range(min(len(S), m), -1, -1):
         for T in combinations(range(len(S)), size):
-            r = _face(A, a, aa, chi, ks, [S[i] for i in T])
+            r = _face(A, a, aa, chi, ks, [S[i] for i in T], fc)
             if r is None or (size and r[0].min() < 0.0):
                 continue
             viol = ks[S] - AS.T @ r[1]
@@ -145,16 +160,16 @@ def _restricted(A, a, aa, chi, ks, S, vtol):
     return None
 
 
-def _colgen(A, a, chi, ks, S0, vtol, dead, maxit=200):
+def _colgen(A, a, chi, ks, S0, vtol, dead, fc, maxit=200):
     """Column generation for  max ks.z  s.t. z >= 0, ||A z - a|| <= chi.
     `dead` are the grid nodes no data weight sees (zero columns of A): they
     are never priced in -- the recession-cone test has already decided that
-    the kernel vanishes there to its tolerance.
+    the kernel vanishes there to its tolerance.  `fc`: face cache (_face).
     Returns (T, z_T, w) or None."""
     aa = float(a @ a)
     S = list(dict.fromkeys(int(i) for i in S0))
     for it in range(maxit):
-        r = _restricted(A, a, aa, chi, ks, S, vtol)
+        r = _restricted(A, a, aa, chi, ks, S, vtol, fc)
         if r is None:
             return None
         T, zT, w = r
@@ -246,7 +261,7 @@ class solver:
         return self.nnls(C)[1]
 
     # ------------------------------------------------------------------ #
-    def _one(self, j, a, chi, S_ml):
+    def _one(self, j, a, chi, S_ml, fc):
         """One target weight: exact band.  Returns (hi, lo, M, dcdchi, status,
         gap_rel); hi/lo are +-inf on unbounded sides, nan on failed sides; M
         and dcdchi are None unless both sides are solved."""
@@ -265,7 +280,7 @@ class solver:
         for sg in (+1, -1):
             ks = sg * self.E_L[j]
             r = _colgen(self.A, a, chi, ks, list(self._supp.get((j, sg), [])) + S_ml,
-                        self.vtol * nrm, self.dead)
+                        self.vtol * nrm, self.dead, fc)
             if r is None:
                 continue
             T, zT, w[sg] = r
@@ -316,12 +331,13 @@ class solver:
         lo = np.empty(p); hi = np.empty(p); M = np.full((p, self.m), np.nan)
         dcdchi = np.full(p, np.nan)
         status = []; gaps = []
+        fc = {}                                    # face cache for this (a, chi)
         for j in range(p):
             if S_ml is None and self.nrm[j] > 0.0:  # chi <= chi_min: no admissible z
                 hi[j] = lo[j] = np.nan
                 status.append("empty_set"); gaps.append(np.nan)
                 continue
-            hi[j], lo[j], Mj, dj, st, g = self._one(j, a, chi, S_ml)
+            hi[j], lo[j], Mj, dj, st, g = self._one(j, a, chi, S_ml, fc)
             if Mj is not None:
                 M[j] = Mj; dcdchi[j] = dj
             status.append(st); gaps.append(g)

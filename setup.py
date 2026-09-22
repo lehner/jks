@@ -5,7 +5,7 @@ scripts = glob.glob("scripts/*")
 
 setup(
     name="jks-system",
-    version="1.1.5",
+    version="1.1.6",
     packages=find_packages(),  # Automatically find the packages in the project
     scripts=scripts,  # Include scripts as is
     entry_points={},
