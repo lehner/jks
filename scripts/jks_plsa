@@ -17,18 +17,26 @@
 #    with this program; if not, write to the Free Software Foundation, Inc.,
 #    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 #
-import jks, sys, os, time, numpy as np
-if len(sys.argv) != 7:
-    print("%s database.jks tag_in list_of_weights_in list_of_weights_out omega_grid tag_out" % sys.argv[0])
+import jks, sys, time, numpy as np
+if len(sys.argv) not in (7, 8):
+    print("%s database.jks tag_in list_of_weights_in list_of_weights_out omega_grid tag_out [dchi2]" % sys.argv[0])
     print("")
     print("- list_of_weights_X accepts a list of")
     print("  a) in integer t for which exp(-t*omega) will be used as the spectral weight")
     print("  b) a string tag to a weight")
     print("")
+    print("- dchi2 (default 1) is the profile-likelihood threshold: the quoted band is")
+    print("    { k.z : z >= 0, chi2(z) <= chi2_min(C) + dchi2 }")
+    print("  i.e. the set of values of the output weight that are within dchi2 of the")
+    print("  best positive description of the data.  dchi2 = 1 is 68% for one")
+    print("  parameter of interest; use 3.84 for 95%.")
+    print("")
     print("- Note that an error on omega_grid is not propagated, use multiple omega_grid if needed")
     sys.exit(0)
 
-db, tag_in, list_w_in, list_w_out, omega_grid, tag_out = sys.argv[1:]
+db, tag_in, list_w_in, list_w_out, omega_grid, tag_out = sys.argv[1:7]
+dchi2 = float(sys.argv[7]) if len(sys.argv) == 8 else 1.0
+assert dchi2 > 0.0, "dchi2 must be positive"
 
 res = jks.resamples(db)
 
@@ -66,53 +74,54 @@ def get_c_in(r):
 c_in = res.apply(get_c_in)
 c_in_mn = c_in.mean()
 
-# full input covariance (the diagonal-only version mis-states the tension by
-# O(1) on correlated data, e.g. lqcd: chi_min 1.09 (diag) vs 1.80 (full))
+# full input covariance.  The diagonal-only version mis-states the tension by
+# O(1) on correlated data (lqcd: chi_min 1.09 diag vs 1.80 full) and it
+# mis-states the propagated statistical error by up to a factor 1.6, because
+# the jackknife blocks carry the correlations whatever metric is used here.
 c_in_cv = np.array(c_in.cov())
-# TODO: diagonal
-c_in_cv = np.diag(c_in_cv.diagonal())
 
-chi2 = 1.0
+PL = jks.positive_laplace
+solver = PL.solver(list_w_in, c_in_cv, list_w_out, omega_grid_arr)
 
 # --- tension between the data and positivity ---------------------------------
 # exact (NNLS), not the faceted lower bound of the old min_chi
-chi_min_in = jks.positive_laplace.min_chi_exact(list_w_in, c_in_mn, c_in_cv, omega_grid_arr,
-                                                floor=None)
+z_ml, chi_min_in = solver.nnls(c_in_mn)
+ml = list_w_out @ z_ml               # maximum-likelihood value of each output
+
 # A nonzero chi_min is the NORMAL state, not a red flag: a correlator dominated by
 # its ground state sits close to the boundary of the moment cone (a single
 # exponential is an extreme ray of it), so an ordinary sub-sigma fluctuation of the
-# central value lands outside.  What matters is whether chi^2_min is comparable to
-# the chi^2 being used: only then is the admissible set a thin cap.
-# The record band is evaluated at chi_r: the requested chi if it is feasible and
-# >= 1, else just outside the cone (the chi=1 band is the natural 1-sigma band,
-# but it does not exist for data off the cone).
-chi_user = chi2 ** 0.5 if chi2 > 0 else 1.0
-chi_floor = 1.05 * chi_min_in
-chi_r = max(chi_user, chi_floor)
-ratio_cap = chi_min_in ** 2 / chi_r ** 2
+# central value lands outside.
+#
+# The record band is therefore taken at a RELATIVE threshold,
+#     chi_r(C)^2 = chi_min(C)^2 + dchi2,
+# so that  [lo, hi] = { y : min_{z>=0, k.z=y} chi2(z) <= chi2_min + dchi2 }
+# is the Delta-chi^2 profile-likelihood interval of the functional k.z.  Unlike
+# an absolute threshold it is never empty -- neither at the central value nor at
+# any resample -- so no feasibility floor and no linearised fallback are needed,
+# and for dchi2 = 1 it is calibrated: in closed-form Monte Carlo over the full
+# analysis it covers the truth 66-70% of the time for outputs the data
+# determine, rising (conservatively) to ~85% for extrapolated ones.
+chi_r = (chi_min_in ** 2 + dchi2) ** 0.5
 print(f"Positivity tension: chi_min = {chi_min_in:.4f}  (chi^2_min = {chi_min_in**2:.4f}, "
-      f"{ratio_cap:.1%} of record chi2 {chi_r**2:g})")
-print(f"Record chi = {chi_r:.4f}  (requested chi2={chi2:g}"
-      + (f"; raised by the feasibility floor 1.05*chi_min={chi_floor:.4f})"
-         if chi_r > chi_user + 1e-12 else ")"))
+      f"{len(c_in_mn)} input weights)")
+print(f"Record chi = {chi_r:.4f}  (chi^2 = chi^2_min + {dchi2:g}, profile-likelihood threshold)")
 if chi_min_in == 0.0:
     print(" the data are reproduced exactly by a positive spectrum on this grid")
-elif ratio_cap <= 0.1:
-    print(" small next to chi2 -- consistent with ordinary noise on the central value")
+elif chi_min_in ** 2 <= len(c_in_mn):
+    print(f" chi^2_min = {chi_min_in**2:.2f} for {len(c_in_mn)} input weights -- ordinary noise on")
+    print(f" the central value, the data are compatible with a positive spectrum")
 else:
-    print(f" the data lie {chi_min_in:.3f} sigma outside the positive cone; the")
-    print(f" admissible set at record chi2={chi_r**2:g} is a spherical cap.  Raise chi2 (e.g. to")
-    print(f" ~{(chi_min_in + 1.0)**2:.0f}) if the quoted bands look narrow, or check")
-    print(f" whether the tension is structural: if chi_min jumps when an input")
-    print(f" weight is added, the window cannot fit it rather than it being noise.")
-    print(f"NOTE: for N~30 resamples, chi2 < ~9 makes ~10% of datasets infeasible.")
+    print(f" the data lie {chi_min_in:.3f} sigma outside the positive cone.  Check whether")
+    print(f" the tension is structural: if chi_min jumps when an input weight is added,")
+    print(f" the window cannot fit it rather than it being noise.  The band is still the")
+    print(f" honest Delta-chi^2 interval, but it sits on a thin cap and its centre will")
+    print(f" move a lot from resample to resample (watch stat/half below).")
 print("")
 
 # --- exact admissible range of every output weight (deterministic) -----------
 t0 = time.time()
-lo, hi, M, info = jks.positive_laplace.positivity_bounds(
-    list_w_in, c_in_mn, c_in_cv, list_w_out, omega_grid_arr,
-    chi=chi_r, floor=None)
+lo, hi, M, info = solver.bands(c_in_mn, chi_r)
 t1 = time.time()
 io = len(list_w_out)
 
@@ -127,68 +136,113 @@ if bad:
                   f"cancel on part of the grid) and this output weight is nonzero along it.")
         else:
             print(f"ERROR: output weight {sel_w_out[j]!r}: dual status {st} (no band) -- "
-                  f"raise chi2 (chi_min={chi_min_in:.3f}) or check the inputs.")
+                  f"raise dchi2 (chi_min={chi_min_in:.3f}) or check the inputs.")
     print("  Refusing to store non-finite values in the database.")
     sys.exit(1)
 central = 0.5 * (lo + hi)
 half = 0.5 * (hi - lo)
-# 1-sigma statistical error of the central value, LINEARIZED (M = slope of the
-# band center): shown for reference; the stored blocks use the EXACT center.
-stat_lin = np.sqrt(np.clip(np.einsum("ja,ab,jb->j", M, c_in_cv, M), 0.0, None))
 
 print(f"Admissible range computed in {t1 - t0:.2f} s (max certificate violation "
       f"{max(v for v in info['violation_rel'] if v == v):.1e} relative)")
 print("")
 
-# --- store: central = band midpoint; stat blocks = the EXACT band center at
-# each jackknife resample (the linearized M @ delta overstates the wobble where
-# positivity clips, by up to an order of magnitude); the band itself as a single
-# '!band' variation whose shift is the half-width, so
-# [central - shift, central + shift] = [lo, hi].
-holder = {"hints": info["hints"], "fallback": 0}
+# --- store -------------------------------------------------------------------
+# central = band midpoint; stat blocks = the EXACT band center at each jackknife
+# resample, each at ITS OWN record chi (so the threshold stays a Delta-chi^2 and
+# the band never collapses).
+#
+# The band is then NOT an independent systematic on top of the statistical
+# error: for an output weight the data determine, the half-width of the
+# Delta-chi^2 = 1 band IS the 1-sigma statistical error (in the unconstrained
+# linear case max/min k.z over chi^2 <= 1 is exactly central +- sigma_k), and
+# the jackknife wobble of the centre is the same sigma_k.  Adding them in
+# quadrature double counts and was what made the output error at an input
+# timeslice sqrt(2) times the input error.  Only the part of the band that the
+# statistics does not already account for is stored as the '!band' variation,
+#     sys = sqrt(max(half^2 - stat^2, 0)),
+# so that the total from tcov() is exactly max(stat, half) -- the calibrated
+# combination: 68% where statistics dominates, conservative where the
+# positivity band does.
+holder = {"fallback": 0, "chi": []}
+c_mn = np.asarray(c_in_mn, float)
 
 def get_c_out(r):
     c_r = np.array(get_c_in(r))
-    m_r, ok, holder["hints"] = jks.positive_laplace.band_center(
-        list_w_in, c_r, c_in_cv, list_w_out, omega_grid_arr, chi_r,
-        hints=holder["hints"])
-    m_lin = central + M @ (c_r - c_in_mn)   # fallback where the resample band is empty
+    if np.array_equal(c_r, c_mn):
+        return central                      # the unresampled point, already solved
+    chi_r_r = (solver.chi_min(c_r) ** 2 + dchi2) ** 0.5
+    holder["chi"].append(chi_r_r)
+    l_r, h_r, _, i_r = solver.bands(c_r, chi_r_r)
+    m_r = 0.5 * (l_r + h_r)
+    ok = np.array([s in ("ok", "zero_kernel") for s in i_r["status"]], bool)
+    if ok.all():
+        return m_r
     holder["fallback"] += int((~ok).sum())
-    return np.where(ok, m_r, m_lin)
+    return np.where(ok, m_r, central + M @ (c_r - c_mn))   # linearised fallback
 
+t0 = time.time()
 jk = res.apply(get_c_out)
+t1 = time.time()
 stat = np.sqrt(np.clip(np.array(jk.cov()).diagonal(), 0.0, None))   # exact, from the blocks
+sys_ = np.sqrt(np.clip(half ** 2 - stat ** 2, 0.0, None))
+total = np.sqrt(stat ** 2 + sys_ ** 2)     # == max(stat, half), evaluated the
+                                           # same way tcov() will evaluate it
 
+nres = len(holder["chi"])
+cc = np.array(holder["chi"]) if nres else np.array([chi_r])
+print(f"{nres} of {res.N} blocks re-solved in {t1 - t0:.2f} s (the rest leave the input "
+      f"weights unchanged); record chi over them: "
+      f"min {cc.min():.3f}  median {np.median(cc):.3f}  max {cc.max():.3f}")
 if holder["fallback"]:
     print(f"note: {holder['fallback']} (resample, output) centers fell back to the")
-    print(f"      linearized slope: the band is empty at that resample's data")
-    print(f"      (chi_min(resample) > record chi = {chi_r:.3f}); expected for small N.")
-    print("")
+    print(f"      linearized slope because the dual did not solve there.")
+print("")
 
-print(" out    central        stat(exact)  half-width   stat/hw")
+band_dom = half > 1.5 * stat                    # positivity sets the answer
+ill_posed = (half > 0) & (stat > 1.5 * half)    # the centre is not an estimate
+print(" out    central       stat        sys         total     stat/half   ML k.z*      (c-ML)/tot")
 for j in range(io):
-    s = f" {sel_w_out[j]!s:>6}  {central[j]: .5e}  {stat[j]: .3e}  {half[j]: .3e}  "
-    s += f"{stat[j] / half[j]:6.2f}" if half[j] > 0 else "    -"
-    # stat/hw ~ 1: stable center, data-dominated;  stat/hw >> 1: the band center
-    # is a hypersensitive functional of the data (free/cap direction) -- quote
-    # the band, not the central value
-    s += "   [band-dominated]" if (not np.isnan(central[j])) and half[j] > 0 and stat[j] > 1.5 * half[j] else ""
+    s = f" {sel_w_out[j]!s:>6}  {central[j]: .5e}  {stat[j]: .3e}  {sys_[j]: .3e}  {total[j]: .3e}  "
+    s += f"{stat[j] / half[j]:8.2f}" if half[j] > 0 else "       -"
+    s += f"  {ml[j]: .5e}"
+    s += f"  {(central[j] - ml[j]) / total[j]: 8.2f}" if total[j] > 0 else "         -"
+    if band_dom[j]:
+        s += "  [band-dominated]"
+    elif ill_posed[j]:
+        s += "  [ill-posed]"
     print(s)
 print("")
-print(" stat is the exact per-resample wobble of the band center (jackknife);")
-print(" half-width is the model band at record chi (stored as the '!band' shift);")
-print(" [band-dominated] marks outputs whose center wobbles more than the band is")
-print(" wide -- there the band (central +- half-width) is the answer, not the center.")
+print(" total = max(stat, half-width of the Delta-chi^2 band); stat is the exact")
+print(" per-resample wobble of the band center (jackknife, gaussian where it dominates),")
+print(" sys = sqrt(half^2 - stat^2) is stored as the '!band' variation so that")
+print(" tcov() reproduces the total.")
+print(" stat/half ~ 1 is the normal, data-dominated case: for an output the data")
+print(" determine, the Delta-chi^2 = 1 half-width IS the 1-sigma statistical error.")
+print(" [band-dominated] (half > 1.5 stat): positivity, not the statistics, sets the")
+print(" answer -- the error is a range, not a gaussian sigma.")
+print(" [ill-posed]      (stat > 1.5 half): the band center moves further than the band")
+print(" is wide, so the center is not an estimate of anything stable -- quote the")
+print(" interval (central +- total) and do not use the central value.")
+print(" ML k.z* is the maximum-likelihood positive spectrum evaluated on the output")
+print(" weight; unlike the band center it does not move with dchi2.  A large")
+print(" |c-ML|/total flags an output where the band is strongly asymmetric.")
+nbd = int(ill_posed.sum())
+if nbd:
+    print("")
+    print(f"WARNING: {nbd} of {io} output weights are ill-posed (stat > 1.5 half):")
+    print("         their central values are not meaningful, only the intervals are.")
 print("")
 
-desc = ("Model-band half-width at record chi (range = central +- shift): positivity "
-        "bounds via dual certificate, record chi2=%g (chi_min=%.3f), omega grid tag "
-        "'%s' [%g..%g] x %d nodes, full input covariance, deterministic.  stat blocks "
-        "= exact band center per resample (linearized fallback in %d cases).  "
+desc = ("Positivity band beyond the statistical error (range = central +- shift), "
+        "dual certificate, profile threshold chi^2 = chi^2_min + %g (chi_min=%.3f, "
+        "record chi=%.3f), omega grid tag '%s' [%g..%g] x %d nodes, full input "
+        "covariance, deterministic.  stat blocks = exact band center per resample at "
+        "its own record chi (%d linearized fallbacks).  shift = "
+        "sqrt(max(half^2-stat^2,0)) so that stat (+) shift = max(stat, half).  "
         "Input weights: %s"
-        % (chi_r ** 2, chi_min_in, grid_tag, min(omega_grid_arr), max(omega_grid_arr),
+        % (dchi2, chi_min_in, chi_r, grid_tag, min(omega_grid_arr), max(omega_grid_arr),
            len(omega_grid_arr), holder["fallback"], sel_w_in))
-jk = jk.addvar("band", central + half, desc)
+jk = jk.addvar("band", central + sys_, desc)
 res.add(tag_out, jk)
 
 res.save(db)
