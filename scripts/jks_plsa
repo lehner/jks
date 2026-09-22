@@ -17,7 +17,7 @@
 #    with this program; if not, write to the Free Software Foundation, Inc.,
 #    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 #
-import jks, sys, time, numpy as np
+import jks, sys, os, time, numpy as np
 if len(sys.argv) not in (7, 8):
     print("%s database.jks tag_in list_of_weights_in list_of_weights_out omega_grid tag_out [dchi2]" % sys.argv[0])
     print("")
@@ -79,6 +79,15 @@ c_mn = np.asarray(c_in_mn, float)
 # mis-states the propagated statistical error by up to a factor 1.6, because
 # the jackknife blocks carry the correlations whatever metric is used here.
 c_in_cv = np.array(c_in.cov())
+
+# protect against problematic covariance matrices
+if "JKS_COVARIANCE_ADDITION" in os.environ:
+    c_in_cv += np.eye(c_in_cv.shape[0]) * float(os.environ["JKS_COVARIANCE_ADDITION"])
+evs, _ = np.linalg.eig(c_in_cv)
+kappa = evs[0] / evs[-1]
+print(f"Covariance condition number: {kappa:e}")
+assert kappa < 1e10, f"Problematic condition number of covariance {kappa}"
+
 
 PL = jks.positive_laplace
 solver = PL.solver(list_w_in, c_in_cv, list_w_out, omega_grid_arr)
