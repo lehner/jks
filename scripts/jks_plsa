@@ -96,8 +96,10 @@ c_mn = np.asarray(c_in_mn, float)
 c_in_cv = np.array(c_in.cov())
 
 # protect against problematic covariance matrices
-if "JKS_COVARIANCE_ADDITION" in os.environ:
-    c_in_cv += np.eye(c_in_cv.shape[0]) * float(os.environ["JKS_COVARIANCE_ADDITION"])
+if "JKS_CORRELATION_STRENGTH" in os.environ:
+    lam = float(os.environ["JKS_CORRELATION_STRENGTH"])
+    assert lam <= 1.0 and 0.0 <= lam, "JKS_CORRELATION_STRENGTH needs to be between 0 and 1"
+    c_in_cv = lam * c_in_cv + (1 - lam) * np.diag(c_in_cv.diagonal())
 evs, _ = np.linalg.eig(c_in_cv)
 evs = sorted(evs.real)
 kappa = evs[-1] / evs[0]
