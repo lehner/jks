@@ -58,7 +58,9 @@ __all__ = ["solver"]
 # nodes and r <= 0 on the nodes at 0, i.e. only the nodes in U contribute to
 # the sum: KKT holds there to rounding / vtol, the same tolerance as in
 # jks.positive_laplace, and the sum over all finite nodes would multiply that
-# rounding by c (an O(1) widening for c ~ 1e9 was seen).
+# rounding by c (an O(1) widening for c ~ 1e9 was seen).  As there, the KKT
+# test is per node at the rounding level of r_j,  |r_j| <= vtol (|k_j| +
+# |A_j| |w|) on the wrong side, which does not depend on the column scaling.
 #
 # _colgen solves exactly on a small candidate set S of free nodes (every face
 # of S and every lower/upper split of the rest of S, largest faces first),
@@ -243,7 +245,7 @@ def _splits(n):
         yield from combinations(range(n), size)
 
 
-def _restricted(A, a, chi, ks, S, U_out, c, vtol, fc):
+def _restricted(A, a, chi, ks, S, U_out, c, vtol, fc, cnA):
     """Exact optimum of the problem restricted to 0 <= x_S <= c_S, nodes
     outside S at 0 or (U_out) at c: the first face T of S (largest first) and
     lower/upper split of S \\ T that satisfies the KKT conditions on S.
@@ -268,25 +270,33 @@ def _restricted(A, a, chi, ks, S, U_out, c, vtol, fc):
                 viol = ks[S] - AS.T @ r[1]
                 viol[list(T)] = 0.0
                 viol[Ui] = -viol[Ui]               # nodes at c need r >= 0
-                if viol.max(initial=-np.inf) <= vtol:  # S may be empty (a vertex start)
+                if (viol <= vtol * (np.abs(ks[S]) + cnA[S] * np.linalg.norm(r[1]))).all():  # S may be empty
                     return [S[i] for i in T], U, r[0], r[1]
     return None
 
 
-def _most_violated(A, ks, T, U, w, frozen):
-    """(node, violation) of the KKT condition over the whole grid: r > 0 at a
-    node at 0, r < 0 at a node in U, r = ks - A^T w."""
+def _relviol(viol, tol):
+    """viol / tol per node (tol = 0: 0 if viol <= 0, else inf)."""
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return np.where(tol > 0.0, viol / np.where(tol > 0.0, tol, 1.0), np.where(viol > 0.0, np.inf, 0.0))
+
+
+def _most_violated(A, ks, T, U, w, frozen, vtol, cnA):
+    """(node, violation / tolerance) of the KKT condition over the whole grid:
+    r > 0 at a node at 0, r < 0 at a node in U, r = ks - A^T w; the
+    tolerance is the rounding level of r_j, vtol (|ks_j| + |A_j| |w|)."""
     viol = ks - A.T @ w
     if U:
         Ul = list(U)
         viol[Ul] = -viol[Ul]
     viol[T] = 0.0
     viol[frozen] = 0.0
-    jn = int(np.argmax(viol))
-    return jn, viol[jn]
+    rel = _relviol(viol, vtol * (np.abs(ks) + cnA * np.linalg.norm(w)))
+    jn = int(np.argmax(rel))
+    return jn, rel[jn]
 
 
-def _colgen(A, a, chi, ks, S0, U0, c, vtol, frozen, fc, prev=None, maxit=200):
+def _colgen(A, a, chi, ks, S0, U0, c, vtol, frozen, fc, cnA, prev=None, maxit=200):
     """Column generation for  max ks.x  s.t. 0 <= x <= c, ||A x - a|| <= chi.
     `frozen` are the nodes never priced in: grid nodes no data weight sees
     (zero columns of A) and nodes with c = 0.  The recession-cone test has
@@ -300,17 +310,17 @@ def _colgen(A, a, chi, ks, S0, U0, c, vtol, frozen, fc, prev=None, maxit=200):
         aU = _shifted(A, a, c, U)
         r = _face(A, aU, float(aU @ aU), chi, ks, T, fc, tuple(sorted(U)))
         if r is not None and not (T and (r[0].min() < 0.0 or (r[0] > c[T]).any())):
-            if _most_violated(A, ks, T, U, r[1], frozen)[1] <= vtol:
+            if _most_violated(A, ks, T, U, r[1], frozen, vtol, cnA)[1] <= 1.0:
                 return list(T), set(U), r[0], r[1]
     S = list(dict.fromkeys(int(i) for i in S0))
     U_out = set(U0) - set(S)
     for it in range(maxit):
-        r = _restricted(A, a, chi, ks, S, U_out, c, vtol, fc)
+        r = _restricted(A, a, chi, ks, S, U_out, c, vtol, fc, cnA)
         if r is None:
             return None
         T, U, xT, w = r
-        jn, v = _most_violated(A, ks, T, U, w, frozen)
-        if v <= vtol:                              # dual feasible: optimal
+        jn, v = _most_violated(A, ks, T, U, w, frozen, vtol, cnA)
+        if v <= 1.0:                               # dual feasible: optimal
             return r
         S = T + [jn]
         U_out = U - {jn}
@@ -380,7 +390,8 @@ class solver:
         self.dead = np.flatnonzero(unseen)         # invisible nodes
         self.frozen = np.flatnonzero(unseen | (self.c == 0.0))
         self._unseen_fin = np.flatnonzero(unseen & ~inf & (self.c > 0.0))
-        self.vtol = vtol                           # dual violation / max|k|
+        self.vtol = vtol                           # dual violation / (|k_j| + |A_j| |w|)
+        self.cnA = np.linalg.norm(self.A, axis=0)  # |A_j|
         self._supp = {}                            # (j, sign) -> last free set
         self._last = (None, None)                  # (C bytes, nnls result)
 
@@ -462,7 +473,7 @@ class solver:
             # (3^|S0| splits), so the earlier free set is only tried as a
             # face (prev) and not added to the start set
             S0 = S_ml if fin.any() or prev is None else list(prev[0]) + S_ml
-            r = _colgen(self.A, a, chi, ks, S0, U0, c, self.vtol * nrm, self.frozen, fc, prev)
+            r = _colgen(self.A, a, chi, ks, S0, U0, c, self.vtol, self.frozen, fc, self.cnA, prev)
             if r is None:
                 continue
             T, U, xT, w[sg] = r

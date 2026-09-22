@@ -51,6 +51,16 @@ __all__ = ["solver"]
 # of the previous solve of the same (output, side), so a new data vector (a
 # jackknife resample) typically costs one closed form and one pricing pass.
 #
+# The KKT test  r_j = s k_j - A_j.w <= 0  is made to the rounding level of
+# r_j itself, per node:  r_j <= vtol (|k_j| + |A_j| |w|).  Both sides scale
+# alike under a rescaling of the grid columns (z_j -> d_j z_j), so the result
+# does not depend on the units of the weights.  A single threshold
+# vtol max_j |k_j| does: for kernels spanning many orders of magnitude over
+# the grid (exp(-t omega) on a wide omega range) it passed real violations at
+# the nodes where |k_j| is small as rounding, stopped the column generation
+# early and returned bands up to ~1e3 too narrow (omega <= 4).  Pricing picks
+# the node of largest r_j / tolerance_j.
+#
 # This replaces a Kelley cutting-plane solve of the dual on HiGHS.  On the
 # two examples it is 25x (lqcd) and 20x (fake) faster, exact to ~1e-12 of the
 # band width where Kelley stopped on stall up to 9e-3 of the width outside,
@@ -143,7 +153,13 @@ def _face(A, a, aa, chi, ks, T, fc):
     return zT, (ny / rho) * (AT @ zT - a)
 
 
-def _restricted(A, a, aa, chi, ks, S, vtol, fc):
+def _relviol(viol, tol):
+    """viol / tol per node (tol = 0: 0 if viol <= 0, else inf)."""
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return np.where(tol > 0.0, viol / np.where(tol > 0.0, tol, 1.0), np.where(viol > 0.0, np.inf, 0.0))
+
+
+def _restricted(A, a, aa, chi, ks, S, vtol, fc, cnA):
     """Exact optimum of the problem restricted to z_S >= 0: the first face T
     of S (largest first) that satisfies the KKT conditions on S."""
     m = A.shape[0]
@@ -155,12 +171,12 @@ def _restricted(A, a, aa, chi, ks, S, vtol, fc):
                 continue
             viol = ks[S] - AS.T @ r[1]
             viol[list(T)] = 0.0
-            if viol.max() <= vtol:
+            if (viol <= vtol * (np.abs(ks[S]) + cnA[S] * np.linalg.norm(r[1]))).all():
                 return [S[i] for i in T], r[0], r[1]
     return None
 
 
-def _colgen(A, a, chi, ks, S0, vtol, dead, fc, maxit=200):
+def _colgen(A, a, chi, ks, S0, vtol, dead, fc, cnA, maxit=200):
     """Column generation for  max ks.z  s.t. z >= 0, ||A z - a|| <= chi.
     `dead` are the grid nodes no data weight sees (zero columns of A): they
     are never priced in -- the recession-cone test has already decided that
@@ -169,15 +185,16 @@ def _colgen(A, a, chi, ks, S0, vtol, dead, fc, maxit=200):
     aa = float(a @ a)
     S = list(dict.fromkeys(int(i) for i in S0))
     for it in range(maxit):
-        r = _restricted(A, a, aa, chi, ks, S, vtol, fc)
+        r = _restricted(A, a, aa, chi, ks, S, vtol, fc, cnA)
         if r is None:
             return None
         T, zT, w = r
         viol = ks - A.T @ w
         viol[T] = 0.0
         viol[dead] = 0.0
-        jn = int(np.argmax(viol))
-        if viol[jn] <= vtol:                       # dual feasible: optimal
+        rel = _relviol(viol, vtol * (np.abs(ks) + cnA * np.linalg.norm(w)))
+        jn = int(np.argmax(rel))
+        if rel[jn] <= 1.0:                         # dual feasible: optimal
             return r
         S = T + [jn]
     return None
@@ -228,7 +245,8 @@ class solver:
         self.m, self.p = m, p
         self.nrm = np.abs(E_L).max(1)
         self.dead = np.flatnonzero(np.abs(E_S).max(0) == 0.0)   # invisible nodes
-        self.vtol = vtol                           # dual violation / max|k|
+        self.vtol = vtol                           # dual violation / (|k_j| + |A_j| |w|)
+        self.cnA = np.linalg.norm(self.A, axis=0)  # |A_j|
         self._supp = {}                            # (j, sign) -> last support
         self._last = (None, None)                  # (C bytes, nnls result)
 
@@ -280,7 +298,7 @@ class solver:
         for sg in (+1, -1):
             ks = sg * self.E_L[j]
             r = _colgen(self.A, a, chi, ks, list(self._supp.get((j, sg), [])) + S_ml,
-                        self.vtol * nrm, self.dead, fc)
+                        self.vtol, self.dead, fc, self.cnA)
             if r is None:
                 continue
             T, zT, w[sg] = r
