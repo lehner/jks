@@ -41,7 +41,6 @@ assert dchi2 > 0.0, "dchi2 must be positive"
 res = jks.resamples(db)
 
 omega_grid_arr = res.get(omega_grid).mean()
-grid_tag = omega_grid
 
 print(f"Performing positivity bounds using energy grid [{min(omega_grid_arr)},..,{max(omega_grid_arr)}] ({len(omega_grid_arr)} resolution)")
 
@@ -73,6 +72,7 @@ def get_c_in(r):
 
 c_in = res.apply(get_c_in)
 c_in_mn = c_in.mean()
+c_mn = np.asarray(c_in_mn, float)
 
 # full input covariance.  The diagonal-only version mis-states the tension by
 # O(1) on correlated data (lqcd: chi_min 1.09 diag vs 1.80 full) and it
@@ -151,7 +151,7 @@ print("")
 # chi_min, chi_r^2 = chi_min^2 + dchi2, with  d chi_r/dC = Sigma^-1 (C - E z*)/chi_r.
 # Without that term M overstates the resample spread by up to ~7x on
 # extrapolated outputs.
-dchi_r = solver.Li.T @ (solver.Li @ (np.asarray(c_in_mn, float) - solver.E_S @ z_ml)) / chi_r
+dchi_r = solver.Li.T @ (solver.Li @ (c_mn - solver.E_S @ z_ml)) / chi_r
 M_tot = M + np.outer(info["dcenter_dchi"], dchi_r)
 
 # --- store -------------------------------------------------------------------
@@ -172,7 +172,6 @@ M_tot = M + np.outer(info["dcenter_dchi"], dchi_r)
 # combination: 68% where statistics dominates, conservative where the
 # positivity band does.
 holder = {"fallback": 0, "chi": []}
-c_mn = np.asarray(c_in_mn, float)
 
 def get_c_out(r):
     c_r = np.array(get_c_in(r))
@@ -248,7 +247,7 @@ desc = ("Positivity band beyond the statistical error (range = central +- shift)
         "its own record chi (%d linearized fallbacks).  shift = "
         "sqrt(max(half^2-stat^2,0)) so that stat (+) shift = max(stat, half).  "
         "Input weights: %s"
-        % (dchi2, chi_min_in, chi_r, grid_tag, min(omega_grid_arr), max(omega_grid_arr),
+        % (dchi2, chi_min_in, chi_r, omega_grid, min(omega_grid_arr), max(omega_grid_arr),
            len(omega_grid_arr), holder["fallback"], sel_w_in))
 jk = jk.addvar("band", central + sys_, desc)
 res.add(tag_out, jk)
