@@ -54,8 +54,11 @@ __all__ = ["solver"]
 # r = s k - A^T w is <= 0 at nodes at 0 and >= 0 at nodes in U (KKT).  For ANY
 # w with r <= 0 on the nodes with c = inf,
 #     s k.x  <=  a'.w + chi |w| + sum_{c_j < inf} max(r_j, 0) c_j,
-# so the dual value is a certificate; with every c finite it needs no
-# tolerance at all.
+# so the dual value is a certificate.  It is evaluated with r = 0 on the free
+# nodes and r <= 0 on the nodes at 0, i.e. only the nodes in U contribute to
+# the sum: KKT holds there to rounding / vtol, the same tolerance as in
+# jks.positive_laplace, and the sum over all finite nodes would multiply that
+# rounding by c (an O(1) widening for c ~ 1e9 was seen).
 #
 # _colgen solves exactly on a small candidate set S of free nodes (every face
 # of S and every lower/upper split of the rest of S, largest faces first),
@@ -467,11 +470,15 @@ class solver:
             prim = float(ks[T] @ xT)                              # at an admissible z
             dual = float(a @ w[sg] + chi * np.linalg.norm(w[sg]))  # at a certificate
             if U:
+                # nodes at their upper bound: primal c_j ks_j, and the dual
+                # term max(r_j, 0) c_j of the certificate.  At free nodes r = 0
+                # and at nodes at 0 r <= 0 up to rounding / vtol (as in
+                # jks.positive_laplace); adding max(r, 0) c there would turn
+                # that rounding into an O(c) widening for a large finite c.
                 Ul = sorted(U)
                 prim += float(ks[Ul] @ c[Ul])
-            if fin.any():
-                rc = ks[fin] - self.A[:, fin].T @ w[sg]
-                dual += float(np.maximum(rc, 0.0) @ c[fin])
+                rc = ks[Ul] - self.A[:, Ul].T @ w[sg]
+                dual += float(np.maximum(rc, 0.0) @ c[Ul])
             if not self._l0:
                 off = float(ks @ self.lower)
                 prim += off; dual += off
