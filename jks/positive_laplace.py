@@ -25,6 +25,7 @@ import highspy
 __all__ = [
     "min_chi_exact",
     "positivity_bounds",
+    "band_center",
 ]
 
 _INF = highspy.kHighsInf
@@ -94,15 +95,18 @@ def _cone_unbounded(E_eq, k, tol):
 # --------------------------------------------------------------------------- #
 
 def _dual_bound_one(E_eq, C_s, Lc, chi, rhs, box0, maxit=200, tol=1e-9,
-                    box_max=25):
+                    box_max=25, init_cuts=None):
     """phi = min { v.C_s + chi*||Lc^T v|| : E_eq^T v >= rhs },  v free, |v| <= box.
 
     E_eq is column-equilibrated (O(1) entries); rhs = rs * k / nrm with nrm =
     max|k|, so the optimum is O(1) (the unscaled optimum of a late-lag kernel
     is below HiGHS dual tolerance and silently corrupts the answer) and
-    v ~ O(1/nrm) (hence box0).  Returns (phi_best, v_best, status, n_cuts);
-    phi_best is the exact objective at v_best; the caller checks v_best's
-    majorisation in original units."""
+    v ~ O(1/nrm) (hence box0).  init_cuts reuses the Kelley cuts of a previous
+    solve at different data (the cuts are data-independent) for fast
+    re-evaluation.  Returns (phi_best, v_best, status, cuts); phi_best is the
+    exact objective at v_best; the caller checks v_best's majorisation in
+    original units.  A solution sitting on the box is never accepted as
+    converged (the objective may keep improving beyond it)."""
     m = len(C_s)
     K = rhs.shape[0]
 
@@ -130,11 +134,12 @@ def _dual_bound_one(E_eq, C_s, Lc, chi, rhs, box0, maxit=200, tol=1e-9,
         h.changeColsCost(m + 1, idx, np.ascontiguousarray(cost, np.float64))
         return h
 
-    cuts = [np.eye(m)[i] for i in range(m)] + [
-        -np.eye(m)[i] for i in range(m)]
+    cuts = (list(init_cuts) if init_cuts
+            else [np.eye(m)[i] for i in range(m)] + [-np.eye(m)[i] for i in range(m)])
     box = float(box0)
     best, v_best = np.inf, None
     nbox = 0
+    stalled = 0
     for it in range(1, maxit + 1):
         h = build(box, cuts)
         h.run()
@@ -145,34 +150,45 @@ def _dual_bound_one(E_eq, C_s, Lc, chi, rhs, box0, maxit=200, tol=1e-9,
             box *= 8.0
             nbox += 1
             if nbox > box_max:
-                return None, None, "infeasible", len(cuts)
+                return None, None, "infeasible", cuts
             continue
         if st == _UNBOUNDED:                              # admissible set empty
-            return None, None, "empty_set", len(cuts)
+            return None, None, "empty_set", cuts
         if st != _OPTIMAL:
-            return None, None, str(st).rsplit(".", 1)[-1], len(cuts)
+            return None, None, str(st).rsplit(".", 1)[-1], cuts
         x = np.asarray(h.getSolution().col_value, np.float64)
         v, s = x[:m], x[m]
         lb = float(C_s @ v + chi * s)
         w = Lc.T @ v
         val = float(C_s @ v + chi * np.sqrt(max(float(w @ w), 0.0)))
-        if val < best:
+        at_box = np.abs(v).max() > 0.999 * box
+        # best is a VALID bound regardless of the gap (exact objective at a
+        # majorisation-feasible v), so any stop keeps rigor; stop on the
+        # optimality gap OR on stall -- the gap floor sits at the HiGHS LP
+        # noise level, and a tight tol alone would burn all of maxit
+        if val < best and (best == np.inf or val < best * (1.0 - 1e-11)):
             best, v_best = val, v.copy()
-        if best - lb <= tol * max(1.0, abs(best)):
+            stalled = 0
+        else:
+            stalled += 1
+        if not at_box and stalled >= 2:
             break
-        if float(w @ w) <= 1e-300:
+        if not at_box and best - lb <= tol * max(1.0, abs(best)):
             break
-        cuts.append(w / np.sqrt(float(w @ w)))
-        if np.abs(v).max() > 0.999 * box:                 # certificate wants more range
-            box *= 8.0
+        if not at_box and float(w @ w) <= 1e-300:
+            break
+        if float(w @ w) > 1e-300:
+            u = w / np.sqrt(float(w @ w))
+            if not cuts or float(np.abs(u - np.asarray(cuts[-1])).max()) > 1e-12:
+                cuts.append(u)
+        if at_box:                 # certificate wants more range (or the dual
+            box *= 8.0             # is unbounded: admissible set empty)
             nbox += 1
             if nbox > box_max:
-                # objective keeps improving with the box: dual unbounded
-                # <=> admissible set empty (chi below chi_min)
-                return None, None, "empty_set", len(cuts)
+                return None, None, "empty_set", cuts
     if v_best is None:
-        return None, None, "no_solution", len(cuts)
-    return best, v_best, "ok", len(cuts)
+        return None, None, "no_solution", cuts
+    return best, v_best, "ok", cuts
 
 
 def min_chi_exact(E_s, C_s, Sigma_s, omega_grid, floor=None) -> float:
@@ -193,6 +209,66 @@ def min_chi_exact(E_s, C_s, Sigma_s, omega_grid, floor=None) -> float:
         Sig + 1e-12 * np.trace(Sig) / len(Sig) * np.eye(len(Sig))))
     z, _ = nnls(L @ E_S, L @ c_data)
     return float(np.linalg.norm(L @ (E_S @ z - c_data)))
+
+
+def _solve_one_output(E_S, E_eq, k, c_data, Lc, chi, rs, tol, maxit, hint):
+    """One target weight: rigorous band without safety margins.
+    Returns (hi_raw, lo_raw, M, status, viol_rel, n_cuts, hint_out);
+    raw values are +-inf on unbounded sides, None on unsolved sides; M is the
+    midpoint slope (None unless fully solved).  hint = (cuts_hi, cuts_lo,
+    ub_hi, ub_lo) from a previous call with the same (E, k, chi) -- the cuts
+    and the cone result are data-independent -- or None."""
+    nrm = float(np.abs(k).max())
+    if nrm <= 0.0:                       # zero target weight
+        return 0.0, 0.0, None, "zero_kernel", 0.0, 0, (None, None, None, None)
+    k = k.copy()
+    k[np.abs(k) <= 1e-9 * nrm] = 0.0     # at the boundedness tolerance
+    if hint is not None and hint[2] is not None:
+        ub_hi, ub_lo = hint[2], hint[3]
+    else:
+        ub_hi, ub_lo = _cone_unbounded(E_eq, k * rs, 1e-9 * nrm)
+    if ub_hi is None or ub_lo is None:   # cone LP itself failed
+        return None, None, None, "cone_lp_failed", np.nan, -1, hint
+    hint = ((hint[0] if hint else None), (hint[1] if hint else None),
+            ub_hi, ub_lo)
+    box0 = 8.0 / nrm                     # v ~ O(1/nrm)
+    hi_raw = lo_raw = None
+    if ub_hi:
+        hi_raw = np.inf
+        st_h, ch, nc_h = "unbounded", hint[0], 0
+    else:
+        phi_h, v_h, st_h, ch = _dual_bound_one(
+            E_eq, c_data, Lc, float(chi), rs * k / nrm, box0, maxit, tol,
+            init_cuts=hint[0])
+        nc_h = len(ch)
+        hi_raw = nrm * phi_h if st_h == "ok" else None
+    if ub_lo:
+        lo_raw = -np.inf
+        st_l, cl, nc_l = "unbounded", hint[1], 0
+    else:
+        phi_l, v_l, st_l, cl = _dual_bound_one(
+            E_eq, c_data, Lc, float(chi), -rs * k / nrm, box0, maxit, tol,
+            init_cuts=hint[1])
+        nc_l = len(cl)
+        lo_raw = -nrm * phi_l if st_l == "ok" else None
+    hint_out = (ch if (not ub_hi and st_h == "ok") else hint[0],
+                cl if (not ub_lo and st_l == "ok") else hint[1],
+                ub_hi, ub_lo)
+    if ub_hi and ub_lo:
+        return hi_raw, lo_raw, None, "unbounded", np.nan, nc_h + nc_l, hint_out
+    if ub_hi:
+        return hi_raw, lo_raw, None, "unbounded_hi", np.nan, nc_h + nc_l, hint_out
+    if ub_lo:
+        return hi_raw, lo_raw, None, "unbounded_lo", np.nan, nc_h + nc_l, hint_out
+    if st_h != "ok" or st_l != "ok":
+        return hi_raw, lo_raw, None, st_h if st_h != "ok" else st_l, np.nan, -1, hint_out
+    # certificate check in ORIGINAL units: u = nrm v must satisfy E^T u >= +/- k
+    u_h = nrm * v_h
+    u_l = nrm * v_l
+    viol = max(float(np.maximum(0.0, k - E_S.T @ u_h).max()),
+               float(np.maximum(0.0, -k - E_S.T @ u_l).max()))
+    M = 0.5 * nrm * (v_h - v_l)
+    return hi_raw, lo_raw, M, "ok", viol / nrm, nc_h + nc_l, hint_out
 
 
 def positivity_bounds(E_s, C_s, Sigma_s, kernel, omega_grid, chi,
@@ -218,7 +294,8 @@ def positivity_bounds(E_s, C_s, Sigma_s, kernel, omega_grid, chi,
     (a zero column) carries invisible weight, which makes every kernel with a
     nonzero entry there unbounded -- reported, not capped.  Kernel entries
     below 1e-9 * max|kernel| are zeroed before solving (they are at the
-    boundedness tolerance)."""
+    boundedness tolerance.  info["hints"] carries the per-output Kelley cuts
+    for fast re-evaluation at other data points via band_center."""
     omega_grid = np.asarray(omega_grid, float)
     E_S, E_L = np.asarray(E_s, float), np.asarray(kernel, float)
     K = len(omega_grid)
@@ -250,66 +327,78 @@ def positivity_bounds(E_s, C_s, Sigma_s, kernel, omega_grid, chi,
     E_eq = E_S * rs[None, :]
 
     lo = np.empty(p); hi = np.empty(p); M = np.empty((p, m))
-    status = []; viols = []; ncuts = []
+    status = []; viols = []; ncuts = []; hints = []
     cmargin = float(np.abs(c_data).sum()
                     + chi * np.sqrt(float((Lc ** 2).sum())))
     for j in range(p):
-        k = E_L[j]
-        nrm = float(np.abs(k).max())
-        if nrm <= 0.0:                       # zero target weight
-            lo[j] = hi[j] = 0.0
-            M[j] = 0.0
-            status.append("zero_kernel"); viols.append(0.0); ncuts.append(0)
-            continue
-        k = k.copy()
-        k[np.abs(k) <= 1e-9 * nrm] = 0.0     # at the boundedness tolerance
-        ub_hi, ub_lo = _cone_unbounded(E_eq, k * rs, 1e-9 * nrm)
-        if ub_hi is None or ub_lo is None:   # cone LP itself failed
-            lo[j] = hi[j] = np.nan
-            M[j] = np.nan
-            status.append("cone_lp_failed"); viols.append(np.nan); ncuts.append(-1)
-            continue
-        box0 = 8.0 / nrm                     # v ~ O(1/nrm)
-        if ub_hi:
-            hi[j] = np.inf
-            phi_h, v_h, st_h, nc_h = (None, None, "unbounded", 0)
-        else:
-            phi_h, v_h, st_h, nc_h = _dual_bound_one(
-                E_eq, c_data, Lc, float(chi), rs * k / nrm, box0, maxit, tol)
-        if ub_lo:
-            lo[j] = -np.inf
-            phi_l, v_l, st_l, nc_l = (None, None, "unbounded", 0)
-        else:
-            phi_l, v_l, st_l, nc_l = _dual_bound_one(
-                E_eq, c_data, Lc, float(chi), -rs * k / nrm, box0, maxit, tol)
-        if (not ub_hi and st_h != "ok") or (not ub_lo and st_l != "ok"):
-            lo[j] = hi[j] = np.nan
-            M[j] = np.nan
-            status.append(st_h if (not ub_hi and st_h != "ok") else st_l)
-            viols.append(np.nan); ncuts.append(-1)
-            continue
-        # certificate check in ORIGINAL units: u = nrm v must satisfy E^T u >= +/- k
-        # (only for the finite sides)
-        viol = 0.0
-        if not ub_hi:
-            u_h = nrm * v_h
-            viol = max(viol, float(np.maximum(0.0, k - E_S.T @ u_h).max()))
-        if not ub_lo:
-            u_l = nrm * v_l
-            viol = max(viol, float(np.maximum(0.0, -k - E_S.T @ u_l).max()))
-        margin = viol * cmargin              # one-sided safety on each endpoint
-        if not ub_hi:
-            hi[j] = nrm * phi_h + margin
-        if not ub_lo:
-            lo[j] = -nrm * phi_l - margin
-        if ub_hi or ub_lo:
-            M[j] = np.nan                    # no finite midpoint slope
-            status.append("unbounded" if (ub_hi and ub_lo)
-                          else ("unbounded_hi" if ub_hi else "unbounded_lo"))
-        else:
-            M[j] = 0.5 * nrm * (v_h - v_l)
-            status.append("ok")
-        viols.append(viol / nrm)
-        ncuts.append(nc_h + nc_l)
-    info = dict(status=status, violation_rel=viols, ncuts=ncuts)
+        hraw, lraw, Mj, st, viol, nc, hint = _solve_one_output(
+            E_S, E_eq, E_L[j], c_data, Lc, chi, rs, tol, maxit, None)
+        if st == "ok":
+            margin = viol * cmargin      # one-sided safety on each endpoint
+            hi[j] = hraw + margin
+            lo[j] = lraw - margin
+        else:                            # keep +-inf on the unbounded side
+            hi[j] = hraw if hraw is not None else np.nan
+            lo[j] = lraw if lraw is not None else np.nan
+        M[j] = 0.0 if st == "zero_kernel" else (Mj if Mj is not None else np.nan)
+        status.append(st); viols.append(viol); ncuts.append(nc); hints.append(hint)
+    info = dict(status=status, violation_rel=viols, ncuts=ncuts, hints=hints)
     return lo, hi, M, info
+
+
+def band_center(E_s, C_vec, Sigma_s, kernel, omega_grid, chi, hints=None,
+                floor=None, tol=1e-9, maxit=200):
+    """Center (lo+hi)/2 of every admissible band at data point C_vec.
+
+    The same problem as positivity_bounds evaluated at a DIFFERENT data vector
+    (e.g. a jackknife resample), returning only the centers.  The Kelley cuts
+    are data-independent, so pass the hints from the main positivity_bounds
+    call to make each re-evaluation a few LP solves.
+
+    Returns (m, ok, hints):  m[j] = band center (nan where the band does not
+    exist at C_vec, e.g. chi below chi_min(C_vec), or the solver failed);
+    ok = per-output success mask; hints = refined cuts for the next call.
+    Centers are margin-free (the safety margins cancel in (lo+hi)/2)."""
+    omega_grid = np.asarray(omega_grid, float)
+    E_S, E_L = np.asarray(E_s, float), np.asarray(kernel, float)
+    K = len(omega_grid)
+    if E_S.ndim != 2 or E_L.ndim != 2 or E_S.shape[1] != K or E_L.shape[1] != K:
+        raise ValueError(
+            "E_s (m, K) and kernel (p, K) must be 2-D with K=%d columns (one per "
+            "omega_grid node); got shapes %s and %s" % (K, E_S.shape, E_L.shape))
+    if floor is not None:
+        keep = omega_grid >= float(floor)
+        omega_grid, E_S, E_L = omega_grid[keep], E_S[:, keep], E_L[:, keep]
+        K = len(omega_grid)
+    if not (np.isfinite(E_S).all() and np.isfinite(E_L).all()):
+        raise ValueError("E_s and kernel must be finite (got NaN/inf entries)")
+    c_data = np.asarray(C_vec, float).ravel()
+    m, p = E_S.shape[0], E_L.shape[0]
+    if c_data.shape[0] != m:
+        raise ValueError("C_vec must have m=%d entries, got %d" % (m, c_data.shape[0]))
+    if not np.isfinite(c_data).all():
+        raise ValueError("C_vec must be finite (got NaN/inf entries)")
+    Sig = np.asarray(Sigma_s, float)
+    Sig = 0.5 * (Sig + Sig.T)
+    if Sig.shape != (m, m):
+        raise ValueError("Sigma_s must be (%d, %d)" % (m, m))
+    try:
+        Lc = np.linalg.cholesky(Sig)
+    except np.linalg.LinAlgError:
+        Lc = np.linalg.cholesky(Sig + 1e-12 * np.trace(Sig) / m * np.eye(m))
+    colmax = np.abs(E_S).max(0)
+    rs = np.where(colmax > 0.0, 1.0 / np.maximum(colmax, 1e-300), 1.0)
+    E_eq = E_S * rs[None, :]
+
+    mm = np.full(p, np.nan)
+    ok = np.zeros(p, bool)
+    hout = []
+    for j in range(p):
+        hint = hints[j] if hints is not None else None
+        hraw, lraw, Mj, st, viol, nc, hint2 = _solve_one_output(
+            E_S, E_eq, E_L[j], c_data, Lc, chi, rs, tol, maxit, hint)
+        if st in ("ok", "zero_kernel"):
+            mm[j] = 0.5 * (hraw + lraw)
+            ok[j] = True
+        hout.append(hint2)
+    return mm, ok, hout
