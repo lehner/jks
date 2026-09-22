@@ -17,7 +17,7 @@
 #    with this program; if not, write to the Free Software Foundation, Inc.,
 #    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 #
-import jks, sys, os, numpy as np
+import jks, sys, os, time, numpy as np
 if len(sys.argv) != 7:
     print("%s database.jks tag_in list_of_weights_in list_of_weights_out omega_grid tag_out" % sys.argv[0])
     print("")
@@ -121,12 +121,11 @@ else:
 print("")
 
 # --- exact admissible range of every output weight (deterministic) -----------
-t0 = __import__("time").time()
+t0 = time.time()
 lo, hi, M, info = jks.positive_laplace.positivity_bounds(
     list_w_in, c_in_mn, c_in_cv, list_w_out, omega_grid_arr,
     chi=chi2 ** 0.5, floor=None)
-t1 = __import__("time").time()
-ii = len(list_w_in)
+t1 = time.time()
 io = len(list_w_out)
 
 bad = [j for j in range(io) if info["status"][j] != "ok"]
