@@ -1,0 +1,3370 @@
+#!/usr/bin/env python3
+#
+#    JKS - Measurement database system
+#    Copyright (C) 2013-2024  Christoph Lehner (christoph.lehner@ur.de, https://github.com/lehner/jks)
+#
+#    This program is free software; you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation; either version 2 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License along
+#    with this program; if not, write to the Free Software Foundation, Inc.,
+#    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+#
+# jks_plot2: drop-in replacement for jks_plot with a matplotlib backend.
+#
+# The calling convention and the meaning of all plot commands are identical
+# to jks_plot.  Instead of generating a gnuplot script and post-processing
+# the result with pdfcrop and exiftool, this script reproduces the relevant
+# parts of gnuplot 6 (pdfcairo terminal, "Helvetica,12 fontscale 0.75",
+# 12cm x 9cm canvas) directly: autoscaling and tic generation, automatic
+# margins, key layout, enhanced text, point symbols and line types.  The
+# page is then cropped to its ink bounding box (as pdfcrop does) and the
+# command line is stored in the XMP dc:description field (as exiftool does).
+#
+# The reference is gnuplot 6.0.2 with Helvetica resolved to Nimbus Sans
+# (URW base35 fonts); text layout follows pango (ligatures, GPOS kerning).
+#
+# The only non-standard dependency is matplotlib (which brings numpy and
+# fontTools).
+#
+import jks, sys, os, math, re, ast
+import numpy
+
+try:
+    import matplotlib
+except ImportError:
+    sys.stderr.write("jks_plot2 requires matplotlib (python3 -m pip install matplotlib)\n")
+    sys.exit(1)
+
+matplotlib.use("Agg")
+matplotlib.rcParams["lines.scale_dashes"] = False
+matplotlib.rcParams["path.snap"] = False
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_pdf import PdfPages
+from matplotlib.transforms import Affine2D, Bbox, TransformedBbox
+from matplotlib.collections import LineCollection
+from matplotlib.patches import PathPatch
+from matplotlib.path import Path
+from matplotlib.text import Text
+from matplotlib.textpath import TextToPath, TextPath
+from matplotlib.font_manager import FontProperties, fontManager, findSystemFonts
+
+argv = [x for x in sys.argv]
+keep = False
+force = True
+
+if "-k" in argv:
+    keep = True
+    argv.remove("-k")
+
+if len(argv) < 4:
+    print("%s out.pdf in.jks cmd1 [cmd2 ...]" % argv[0])
+    sys.exit(0)
+
+fout = argv[1]
+fin = argv[2]
+icmds = argv[3:]
+
+targetDir = "%s.input" % fout
+if os.path.isdir(targetDir):
+    if not force:
+        sys.stderr.write(
+            "%s already exists, do not overwrite (use -f if you insist)\n" % targetDir
+        )
+        sys.exit(1)
+else:
+    os.mkdir(targetDir)
+
+fpdf_name = "%s/plots.pdf" % targetDir
+desc_name = "%s/desc.txt" % targetDir
+
+desc = open(desc_name, "wt")
+desc.write(str({"pwd": os.getcwd(), "argv": sys.argv}))
+desc.close()
+
+jks2 = jks.resamples(fin)
+
+messages = []
+
+
+def warn(msg):
+    messages.append(msg)
+
+
+class GnuplotError(Exception):
+    pass
+
+
+###############################################################################
+# Data files (identical to jks_plot)
+###############################################################################
+files = []
+fid = -1
+
+
+def NamedTemporaryFile():
+    global fid
+    fid += 1
+    return open("%s/data.%3.3d" % (targetDir, fid), "wt")
+
+
+def create_file(tag):
+    jk = jks2.get(tag)
+    mn = jk.mean()
+    cv = jk.cov()
+    tcv = jk.tcov()
+    f = NamedTemporaryFile()
+
+    if "BIN" in os.environ:
+
+        cv_sys = numpy.array(tcv) - numpy.array(cv)
+
+        # Treat special case of single element
+        def mka(a):
+            if type(a) == type([]):
+                return a
+            return [[a]]
+
+        # delayed binning done here
+        mean = numpy.array(jk.orig)
+        stat_blocks = [
+            numpy.array(jk.blocks[i]) - mean
+            for i in range(len(jk.tags))
+            if jk.tags[i][0] != "!"
+        ]
+        n = len(stat_blocks)
+
+        m = int(os.environ["BIN"])
+        n -= n % m
+        assert n % m == 0
+
+        print("BIN by", m)
+
+        a = []
+        for ic in range(m):
+            stat_blocks_cycled = numpy.roll(stat_blocks, ic, axis=0)
+            rec_stat_blocks = [
+                (n - m)
+                / m
+                / (n // m - 1)
+                * numpy.sum(stat_blocks_cycled[i * m : (i + 1) * m], axis=0)
+                for i in range(n // m)
+            ]
+            rec_stat_cov = mka(
+                (
+                    (n // m - 1) ** 2.0
+                    / (n // m)
+                    * numpy.cov(m=rec_stat_blocks, rowvar=0, ddof=1)
+                ).tolist()
+            )
+            a.append(rec_stat_cov)
+        cv_stat = numpy.mean(a, axis=0)
+
+        cv = cv_stat
+        tcv = cv_sys + cv_stat
+
+    for i in range(len(mn)):
+        f.write(
+            "%d %.15g %.15g %.15g\n" % (i, mn[i], tcv[i][i] ** 0.5, cv[i][i] ** 0.5)
+        )
+    f.flush()
+    f.close()
+    return f.name
+
+
+def create_file_p(xtag, ytag, sel=None):
+    xjk = jks2.get(xtag)
+    xmn = xjk.mean()
+    xcv = xjk.cov()
+    xtcv = xjk.tcov()
+
+    yjk = jks2.get(ytag)
+    ymn = yjk.mean()
+    ycv = yjk.cov()
+    ytcv = yjk.tcov()
+
+    assert len(xmn) == len(ymn)
+
+    f = NamedTemporaryFile()
+    for i in range(len(xmn)):
+        if not sel is None:
+            if not i in sel:
+                continue
+        f.write(
+            "%.15g %.15g %.15g %.15g %.15g %.15g\n"
+            % (
+                xmn[i],
+                ymn[i],
+                xtcv[i][i] ** 0.5,
+                ytcv[i][i] ** 0.5,
+                xcv[i][i] ** 0.5,
+                ycv[i][i] ** 0.5,
+            )
+        )
+    f.flush()
+    f.close()
+    return f.name
+
+
+def create_file_d(x, y, yerr):
+    f = NamedTemporaryFile()
+    f.write("%s %s %s\n" % (x, y, yerr))
+    f.flush()
+    f.close()
+    return f.name
+
+
+def create_fnc_file(tag, fncs, t0, t1):
+    fnc = eval("lambda x,p: %s" % fncs)
+    jk = jks2.get(tag)
+    mn = jk.mean()
+    tcv = jk.tcov()
+    f = NamedTemporaryFile()
+
+    eps = 1e-8
+    N = 50
+    xrang = [t0 + (t1 - t0) * i / N for i in range(N + 1)]
+    jks.write_confidence_band(fnc, mn, tcv, eps, xrang, f.name)
+    f.flush()
+    f.close()
+    return f.name
+
+
+def get_val(tag, n, fmt):
+    jk = jks2.get(tag)
+    mn = jk.mean()
+
+    if n < 0:
+        n += len(mn)
+
+    mn = mn[n]
+    if fmt == None:
+        err = jk.tcov()[n][n] ** 0.5
+        if err == 0.0:
+            return "%.2g" % mn
+        return jks.gformat(mn, {"": err}, [""], times="x")
+    else:
+        return fmt % mn
+
+
+def has(tag):
+    return tag in jks2.keys()
+
+
+def mktitle(tg):
+    while True:
+        i = tg.find("***")
+        if i == -1:
+            break
+        e = tg[i + 3 :].find("***")
+        if e == -1:
+            break
+        a = tg[i + 3 : e + i + 3].split(" ")
+        if len(a) == 1:
+            n = 0
+            fmt = None
+        elif len(a) == 2:
+            n = int(a[1])
+            fmt = None
+        elif len(a) == 3:
+            n = int(a[1])
+            fmt = a[2]
+        else:
+            return tg
+        tg = tg[:i] + get_val(a[0], n, fmt) + tg[i + e + 6 :]
+    return tg
+
+
+###############################################################################
+# gnuplot constants (pdfcairo, font 'Helvetica,12', size 12cm,9cm, fontscale 0.75)
+###############################################################################
+VERYLARGE = sys.float_info.max / 2 - 1
+SIGNIF = 0.01
+ZERO = 1e-8
+DEG2RAD = math.pi / 180.0
+
+SCALE = 200  # terminal units per point (GP_CAIRO_SCALE)
+PAGE_W = 340  # 12cm in points
+PAGE_H = 255  # 9cm in points
+T_XMAX = (PAGE_W - 1) * SCALE
+T_YMAX = (PAGE_H - 1) * SCALE
+H_CHAR = 1334
+V_CHAR = 2400
+H_TIC = 960
+V_TIC = 960
+ERRORBARTIC = H_TIC // 2
+FONTSIZE = 9.0  # 12 * fontscale 0.75, in gnuplot points
+TEXT_SCALE = 4.0 / 3.0  # pango renders at 96 dpi
+LW_SCALE = 0.5  # lw 1 is 0.5pt
+POINTINTERVALBOX = 0.01
+
+CANVAS = (0, 0, T_XMAX - 1, T_YMAX - 1)  # clip area used for arrows and the key
+LEFT, CENTRE, RIGHT = -1, 0, 1  # enum JUSTIFY
+JUST_TOP, JUST_CENTRE, JUST_BOT = 0, 1, 2  # enum VERT_JUSTIFY
+
+LT_AXIS, LT_BLACK, LT_NODRAW, LT_BACKGROUND = -1, -2, -3, -4
+
+INRANGE, OUTRANGE, UNDEFINED = 0, 1, 2
+
+DEFAULT_COLORS = [
+    0x9400D3,
+    0x009E73,
+    0x56B4E9,
+    0xE69F00,
+    0xF0E442,
+    0x0072B2,
+    0xE51E10,
+    0x000000,
+]
+
+COLOR_NAMES = {'white': 0xffffff, 'black': 0x000000, 'dark-grey': 0xa0a0a0, 'red': 0xff0000, 'web-green': 0x00c000, 'web-blue': 0x0080ff, 'dark-magenta': 0xc000ff, 'dark-cyan': 0x00eeee, 'dark-orange': 0xc04000, 'dark-yellow': 0xc8c800, 'royalblue': 0x4169e1, 'goldenrod': 0xffc020, 'dark-spring-green': 0x008040, 'purple': 0xc080ff, 'steelblue': 0x306080, 'dark-red': 0x8b0000, 'dark-chartreuse': 0x408000, 'orchid': 0xff80ff, 'aquamarine': 0x7fffd4, 'brown': 0xa52a2a, 'yellow': 0xffff00, 'turquoise': 0x40e0d0, 'grey0': 0x000000, 'grey10': 0x1a1a1a, 'grey20': 0x333333, 'grey30': 0x4d4d4d, 'grey40': 0x666666, 'grey50': 0x7f7f7f, 'grey60': 0x999999, 'grey70': 0xb3b3b3, 'grey': 0xc0c0c0, 'grey80': 0xcccccc, 'grey90': 0xe5e5e5, 'grey100': 0xffffff, 'light-red': 0xf03232, 'light-green': 0x90ee90, 'light-blue': 0xadd8e6, 'light-magenta': 0xf055f0, 'light-cyan': 0xe0ffff, 'light-goldenrod': 0xeedd82, 'light-pink': 0xffb6c1, 'light-turquoise': 0xafeeee, 'gold': 0xffd700, 'green': 0x00ff00, 'dark-green': 0x006400, 'spring-green': 0x00ff7f, 'forest-green': 0x228b22, 'sea-green': 0x2e8b57, 'blue': 0x0000ff, 'dark-blue': 0x00008b, 'midnight-blue': 0x191970, 'navy': 0x000080, 'medium-blue': 0x0000cd, 'skyblue': 0x87ceeb, 'cyan': 0x00ffff, 'magenta': 0xff00ff, 'dark-turquoise': 0x00ced1, 'dark-pink': 0xff1493, 'coral': 0xff7f50, 'light-coral': 0xf08080, 'orange-red': 0xff4500, 'salmon': 0xfa8072, 'dark-salmon': 0xe9967a, 'khaki': 0xf0e68c, 'dark-khaki': 0xbdb76b, 'dark-goldenrod': 0xb8860b, 'beige': 0xf5f5dc, 'olive': 0xa08020, 'orange': 0xffa500, 'violet': 0xee82ee, 'dark-violet': 0x9400d3, 'plum': 0xdda0dd, 'dark-plum': 0x905040, 'dark-olivegreen': 0x556b2f, 'orangered4': 0x801400, 'brown4': 0x801414, 'sienna4': 0x804014, 'orchid4': 0x804080, 'mediumpurple3': 0x8060c0, 'slateblue1': 0x8060ff, 'yellow4': 0x808000, 'sienna1': 0xff8040, 'tan1': 0xffa040, 'sandybrown': 0xffa060, 'light-salmon': 0xffa070, 'pink': 0xffc0c0, 'khaki1': 0xffff80, 'lemonchiffon': 0xffffc0, 'bisque': 0xcdb79e, 'honeydew': 0xf0fff0, 'slategrey': 0xa0b6cd, 'seagreen': 0xc1ffc1, 'antiquewhite': 0xcdc0b0, 'chartreuse': 0x7cff40, 'greenyellow': 0xa0ff20, 'gray': 0xbebebe, 'light-gray': 0xd3d3d3, 'light-grey': 0xd3d3d3, 'dark-gray': 0xa0a0a0, 'slategray': 0xa0b6cd, 'gray0': 0x000000, 'gray10': 0x1a1a1a, 'gray20': 0x333333, 'gray30': 0x4d4d4d, 'gray40': 0x666666, 'gray50': 0x7f7f7f, 'gray60': 0x999999, 'gray70': 0xb3b3b3, 'gray80': 0xcccccc, 'gray90': 0xe5e5e5, 'gray100': 0xffffff}
+
+# Adobe Symbol encoding -> unicode (from gnuplot's gp_cairo.c)
+SYMBOL_MAP = {34:0x2200,36:0x2203,39:0x220d,64:0x2245,65:0x391,66:0x392,67:0x3a7,68:0x394,69:0x395,70:0x3a6,71:0x393,72:0x397,73:0x399,74:0x3d1,75:0x39a,76:0x39b,77:0x39c,78:0x39d,79:0x39f,80:0x3a0,81:0x398,82:0x3a1,83:0x3a3,84:0x3a4,85:0x3a5,86:0x3c2,87:0x3a9,88:0x39e,89:0x3a8,90:0x396,91:0x5b,92:0x2234,93:0x5d,94:0x22a5,95:0x5f,96:0xf8e5,97:0x3b1,98:0x3b2,99:0x3c7,100:0x3b4,101:0x3b5,102:0x3c6,103:0x3b3,104:0x3b7,105:0x3b9,106:0x3d5,107:0x3ba,108:0x3bb,109:0xb5,110:0x3bd,111:0x3bf,112:0x3c0,113:0x3b8,114:0x3c1,115:0x3c3,116:0x3c4,117:0x3c5,118:0x3d6,119:0x3c9,120:0x3be,121:0x3c8,122:0x3b6,123:0x7b,124:0x7c,125:0x7d,126:0x223c,160:0x20ac,161:0x3d2,162:0x2032,163:0x2264,164:0x2044,165:0x221e,166:0x192,167:0x2663,168:0x2666,169:0x2665,170:0x2660,171:0x2194,172:0x2190,173:0x2191,174:0x2192,175:0x2193,176:0xb0,177:0xb1,178:0x2033,179:0x2265,180:0xd7,181:0x221d,182:0x2202,183:0x2022,184:0xf7,185:0x2260,186:0x2261,187:0x2248,188:0x2026,189:0x23d0,190:0x23af,191:0x21b5,192:0x2135,193:0x2111,194:0x211c,195:0x2118,196:0x2297,197:0x2295,198:0x2205,199:0x2229,200:0x222a,201:0x2283,202:0x2287,203:0x2284,204:0x2282,205:0x2286,206:0x2208,207:0x2209,208:0x2220,209:0x2207,210:0xae,211:0xa9,212:0x2122,213:0x220f,214:0x221a,215:0x22c5,216:0xac,217:0x2227,218:0x2228,219:0x21d4,220:0x21d0,221:0x21d1,222:0x21d2,223:0x21d3,224:0x25ca,225:0x3008,226:0xae,227:0xa9,228:0x2122,229:0x2211,230:0x239b,231:0x239c,232:0x239d,233:0x23a1,234:0x23a2,235:0x23a3,236:0x23a7,237:0x23a8,238:0x23a9,239:0x23aa,241:0x3009,242:0x222b,243:0x2320,244:0x23ae,245:0x2321,246:0x239e,247:0x239f,248:0x23a0,249:0x23a4,250:0x23a5,251:0x23a6,252:0x23ab,253:0x23ac,254:0x23ad}
+
+
+# pdfcrop takes the bounding box from ghostscript's bbox device (4000 dpi),
+# whose glyph cache pads glyph boxes on the device-left side by a few
+# pixels.  Measured for Nimbus Sans (the Helvetica substitute) upright and
+# rotated by 90 degrees; for other angles ghostscript uses the rotated glyph
+# box.  Only matters for the integer crop box.
+GS_PIXEL = 72.0 / 4000.0
+_GS_PAD_CHARS = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-+.,()[]/|'*=<>_^$%&!?:;@#"
+_GS_PAD_0 = [6, 5, 0, 6, 4, 0, 6, 0, 2, 2, 5, 5, 6, 2, 4, 5, 0, 0, 5, 1, 0, 6, 0, 0, 1, 5, 2, 7, 0, 2, 4, 0, 5, 5, 7, 6, 5, 6, 1, 4, 5, 5, 6, 0, 4, 4, 6, 6, 3, 4, 2, 6, 2, 7, 1, 7, 2, 5, 0, 0, 2, 4, 0, 2, 3, 3, 2, 2, 4, 0, 1, 4, 1, 4, 2, 7, 2, 0, 6, 3, 0, 4, 4, 4, 2, 2, 0, 2]
+_GS_PAD_90 = [4, 4, 4, 4, 4, 6, 4, 6, 4, 4, 7, 0, 7, 0, 7, 6, 7, 0, 0, 0, 0, 0, 7, 7, 7, 7, 7, 7, 7, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6, 2, 1, 1, 0, 0, 0, 0, 0, 0, 6, 0, 3, 2, 2, 2, 6, 5, 0, 6, 0, 0, 1, 1, 0, 6]
+GS_PAD = dict((c, (a * GS_PIXEL, b * GS_PIXEL)) for c, a, b in zip(_GS_PAD_CHARS, _GS_PAD_0, _GS_PAD_90))
+# rotated by -45 degrees (x0, y0, x1, y1 corrections in 1/100 pt at 12pt)
+_GS_45_CHARS = "0135689abcefghjknopqrstuvwyDEFHJKLMPRTVWXYZ+.,)]/'*=<>$&!?:;"
+_GS_45 = [[-55, -55, 9, 6], [-5, 0, 0, -2], [-17, -34, 30, 31], [-10, -33, 0, 0], [-12, -32, 24, 11], [-30, -32, 28, 27], [-24, -14, 12, 30], [-23, 0, 30, 0], [0, -42, 40, 0], [-39, -27, 10, 39], [-40, -28, 22, 40], [-4, 0, 0, 0], [-27, -7, 0, 40], [-3, 0, 0, -2], [0, -22, 0, -2], [-7, 0, 0, 0], [-3, 0, 0, 0], [-39, -40, 42, 39], [0, -41, 42, 0], [-40, 0, 0, 40], [-2, 0, 0, 0], [-31, -31, 27, 28], [-14, 0, 0, 0], [-23, 0, 0, 0], [-7, 0, 0, 0], [0, 0, 0, -2], [0, -5, 0, 0], [0, 0, 0, -2], [0, 0, 0, -2], [0, 0, 0, -2], [0, 0, 0, -3], [-27, -27, 0, 0], [0, 0, 0, -2], [-11, 0, 0, -3], [0, 0, 0, -2], [0, 0, 0, -2], [0, 0, 0, -2], [0, 0, 0, -3], [0, 0, 0, -3], [0, 0, 0, -2], [0, 0, 0, -3], [0, 0, 0, -3], [0, 0, 0, -2], [-4, 0, 0, 0], [-3, 0, 0, 0], [0, -20, 0, 0], [0, 0, 0, -2], [0, 0, 0, -2], [0, 0, 0, -2], [-12, 0, 0, 0], [-12, 0, 0, -3], [-8, 0, 0, -2], [0, 0, 0, -2], [0, 0, 0, -2], [-23, -8, 23, 23], [-26, 0, 20, 21], [-6, 0, 0, -2], [-3, 0, 0, 0], [-8, 0, 0, 0], [0, -20, 0, 0]]
+GS_45 = dict((c, [v / 100.0 for v in d]) for c, d in zip(_GS_45_CHARS, _GS_45))
+_glyph_ext_cache = {}
+
+
+def glyph_extents(ch, fontname, size_pt, angle=0):
+    key = (ch, fontname, size_pt, angle)
+    if key not in _glyph_ext_cache:
+        try:
+            tp = TextPath((0, 0), ch, prop=font_props(fontname, size_pt))
+            if angle:
+                tp = tp.transformed(Affine2D().rotate_deg(angle))
+            e = tp.get_extents().extents
+            _glyph_ext_cache[key] = tuple(e) if e[0] <= e[2] else None
+        except Exception:
+            _glyph_ext_cache[key] = None
+    return _glyph_ext_cache[key]
+
+
+def u2pt(u):
+    # terminal units -> PDF points (cairo draws with a half point offset)
+    return u / SCALE + 0.5
+
+
+def inrange(z, a, b):
+    return (z >= a and z <= b) if a < b else (z >= b and z <= a)
+
+
+def cint(v):
+    # C conversion of a double to int (truncation)
+    return int(v)
+
+
+###############################################################################
+# Fonts and text measurement
+###############################################################################
+def _setup_fonts():
+    known = set(f.name for f in fontManager.ttflist)
+    wanted = ["Nimbus Sans", "Helvetica", "Arial", "Liberation Sans", "TeX Gyre Heros"]
+    if not any(w in known for w in wanted):
+        pat = re.compile(
+            r"(NimbusSans-(Regular|Bold|Italic|BoldItalic)|NimbusSanL-(Regu|Bold|ReguItal|BoldItal)|"
+            r"LiberationSans-(Regular|Bold|Italic|BoldItalic)|texgyreheros-(regular|bold|italic|bolditalic)|"
+            r"Arial|Helvetica)\.(otf|ttf)$",
+            re.I,
+        )
+        try:
+            for p in findSystemFonts():
+                if pat.search(os.path.basename(p)):
+                    try:
+                        fontManager.addfont(p)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        known = set(f.name for f in fontManager.ttflist)
+    sans = [w for w in wanted if w in known] + ["DejaVu Sans"]
+    serif = [
+        w
+        for w in ["Nimbus Roman", "Times New Roman", "Times", "Liberation Serif"]
+        if w in known
+    ] + ["DejaVu Serif"]
+    mono = [
+        w
+        for w in ["Nimbus Mono PS", "Courier New", "Courier", "Liberation Mono"]
+        if w in known
+    ] + ["DejaVu Sans Mono"]
+    return sans, serif, mono
+
+
+FONT_SANS, FONT_SERIF, FONT_MONO = _setup_fonts()
+_ttp = TextToPath()
+_width_cache = {}
+_prop_cache = {}
+
+
+def font_props(fontname, size_pt):
+    key = (fontname, size_pt)
+    if key in _prop_cache:
+        return _prop_cache[key]
+    base = fontname.split(":")[0]
+    lname = base.lower()
+    if lname == "sans":
+        family = ["DejaVu Sans"] + FONT_SANS
+    elif "times" in lname or "roman" in lname or "serif" in lname:
+        family = FONT_SERIF
+    elif "courier" in lname or "mono" in lname:
+        family = FONT_MONO
+    else:
+        family = FONT_SANS
+    bold = ":Bold" in fontname or "-bold" in lname
+    italic = ":Italic" in fontname or "italic" in lname or "oblique" in lname
+    p = FontProperties(
+        family=family,
+        size=size_pt,
+        weight="bold" if bold else "normal",
+        style="italic" if italic else "normal",
+    )
+    _prop_cache[key] = p
+    return p
+
+
+def _advance_width(s, prop, size_pt):
+    # sum of glyph advances (including spaces), laid out like the PDF backend does
+    from matplotlib import _text_helpers
+    from matplotlib.ft2font import Kerning, LoadFlags
+    from matplotlib.font_manager import get_font
+
+    font = get_font(fontManager._find_fonts_by_props(prop))
+    font.set_size(size_pt, 72)
+    last = None
+    for item in _text_helpers.layout(s, font, kern_mode=Kerning.UNFITTED):
+        last = item
+    if last is None:
+        return 0.0
+    g = last.ft_object.load_glyph(last.glyph_idx, flags=LoadFlags.NO_HINTING)
+    return last.x + g.linearHoriAdvance / 65536.0
+
+
+class ShapingFont:
+    # The subset of HarfBuzz shaping that pango applies to Latin text:
+    # GSUB 'liga' ligatures and GPOS 'kern' pair adjustments, read with
+    # fontTools (a matplotlib dependency).  matplotlib itself only knows the
+    # legacy TrueType 'kern' table.
+    def __init__(self, path):
+        from fontTools.ttLib import TTFont
+
+        f = TTFont(path, lazy=True, fontNumber=0)
+        self.upem = float(f["head"].unitsPerEm)
+        self.cmap = f.getBestCmap() or {}
+        self.hmtx = f["hmtx"].metrics
+        self.has_kern_table = "kern" in f
+        self.ligatures = {}
+        self.pairs = []
+        if "GSUB" in f:
+            t = f["GSUB"].table
+            for idx in self._lookups(t, "liga"):
+                for st in self._subtables(t, idx, 7):
+                    if getattr(st, "LookupType", 4) == 4 and hasattr(st, "ligatures"):
+                        for first, ligs in st.ligatures.items():
+                            for lig in ligs:
+                                self.ligatures.setdefault(first, []).append((tuple(lig.Component), lig.LigGlyph))
+            for first in self.ligatures:
+                self.ligatures[first].sort(key=lambda z: -len(z[0]))
+        if "GPOS" in f:
+            t = f["GPOS"].table
+            for idx in self._lookups(t, "kern"):
+                sts = [st for st in self._subtables(t, idx, 9) if getattr(st, "LookupType", 2) == 2]
+                self.pairs.append(sts)
+
+    @staticmethod
+    def _lookups(table, tag):
+        if not table.FeatureList or not table.LookupList:
+            return []
+        idx = set()
+        for fr in table.FeatureList.FeatureRecord:
+            if fr.FeatureTag == tag:
+                idx.update(fr.Feature.LookupListIndex)
+        return sorted(idx)
+
+    @staticmethod
+    def _subtables(table, idx, ext_type):
+        lk = table.LookupList.Lookup[idx]
+        out = []
+        for st in lk.SubTable:
+            if lk.LookupType == ext_type:
+                st = st.ExtSubTable
+            out.append(st)
+        return out
+
+    def advance(self, glyph):
+        return self.hmtx[glyph][0] / self.upem if glyph in self.hmtx else 0.0
+
+    def kern(self, g1, g2):
+        total = 0.0
+        for sts in self.pairs:
+            for st in sts:
+                cov = st.Coverage.glyphs
+                if g1 not in cov:
+                    continue
+                v = None
+                if st.Format == 1:
+                    ps = st.PairSet[cov.index(g1)]
+                    for rec in ps.PairValueRecord:
+                        if rec.SecondGlyph == g2:
+                            v = rec.Value1
+                            break
+                    if v is None:
+                        continue
+                else:
+                    c1 = st.ClassDef1.classDefs.get(g1, 0)
+                    c2 = st.ClassDef2.classDefs.get(g2, 0)
+                    v = st.Class1Record[c1].Class2Record[c2].Value1
+                total += (getattr(v, "XAdvance", 0) or 0) / self.upem if v is not None else 0.0
+                break
+        return total
+
+    def shape(self, s):
+        # returns [(text, glyph or None)] glyph units
+        units = []
+        i = 0
+        while i < len(s):
+            g = self.cmap.get(ord(s[i]))
+            if g is None:
+                units.append((s[i], None))
+                i += 1
+                continue
+            done = False
+            for comps, lig in self.ligatures.get(g, []):
+                n = len(comps)
+                if i + n < len(s) + 0 and all(self.cmap.get(ord(s[i + 1 + k])) == comps[k] for k in range(n)):
+                    units.append((s[i : i + n + 1], lig))
+                    i += n + 1
+                    done = True
+                    break
+            if not done:
+                units.append((s[i], g))
+                i += 1
+        return units
+
+
+_shaping_fonts = {}
+
+
+def shaping_font(prop):
+    try:
+        path = fontManager.findfont(prop, fallback_to_default=False)
+    except Exception:
+        return None
+    if path not in _shaping_fonts:
+        try:
+            _shaping_fonts[path] = ShapingFont(path)
+        except Exception:
+            _shaping_fonts[path] = None
+    return _shaping_fonts[path]
+
+
+def kern_runs(s, fontname, size_pt):
+    # split s into runs that matplotlib can draw without further positioning;
+    # returns ([(offset, run)], width) with pango's advances and kerning
+    key = (s, fontname, size_pt)
+    if key in _width_cache:
+        return _width_cache[key]
+    prop = font_props(fontname, size_pt)
+    sf = shaping_font(prop)
+    out = []
+    x = 0.0
+    if sf is None:
+        out.append((0.0, s))
+        x = _raw_width(s, prop, size_pt)
+    else:
+        run = ""
+        run_x = 0.0
+        prev = None
+        for text, g in sf.shape(s):
+            k = sf.kern(prev, g) * size_pt if (prev is not None and g is not None) else 0.0
+            split = k != 0.0 or g is None or prev is None or sf.has_kern_table
+            if split and run:
+                out.append((run_x, run))
+                run = ""
+            x += k
+            if not run:
+                run_x = x
+            run += text
+            x += sf.advance(g) * size_pt if g is not None else _raw_width(text, prop, size_pt)
+            prev = g
+            if g is None:
+                out.append((run_x, run))
+                run = ""
+        if run:
+            out.append((run_x, run))
+    _width_cache[key] = (out, x)
+    return out, x
+
+
+def _raw_width(s, prop, size_pt):
+    if s == "":
+        return 0.0
+    try:
+        return _advance_width(s, prop, size_pt)
+    except Exception:
+        return _ttp.get_text_width_height_descent(s, prop, ismath=False)[0]
+
+
+def text_width(s, fontname, size_pt):
+    if s == "":
+        return 0.0
+    return kern_runs(s, fontname, size_pt)[1]
+
+
+###############################################################################
+# gnuplot enhanced text (port of term.c:enhanced_recursion)
+###############################################################################
+def contains_unicode(s):
+    return re.search(r"\\U\+[0-9a-fA-F]{4}", s) is not None
+
+
+def enhanced_recursion(p, i, brace, fontname, fontsize, base, widthflag, showflag, overprint, sink):
+    wasitalic = ":Italic" in fontname
+    wasbold = ":Bold" in fontname
+    sink.flush()
+    sink.track_height(base, fontsize)
+    n = len(p)
+    while i < n:
+        c = p[i]
+        if c == "}":
+            if brace:
+                return i
+            warn("enhanced text parser - spurious }")
+        elif c == "_" or c == "^":
+            shift = 0.5 if c == "^" else -0.3
+            sink.flush()
+            i = enhanced_recursion(
+                p, i + 1, False, fontname, fontsize * 0.8, base + shift * fontsize,
+                widthflag, showflag, overprint, sink,
+            )
+        elif c == "{":
+            isitalic = isbold = isnormal = False
+            localfont = None
+            f = fontsize
+            i += 1
+            if overprint == 2:
+                m = re.match(r"\s*[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?", p[i:])
+                if m:
+                    base += float(m.group(0)) * f
+                    i += len(m.group(0))
+            if i < n and p[i] == "/":
+                i += 1
+                while i < n and p[i] == " ":
+                    i += 1
+                if i < n and p[i] == "-":
+                    i += 1
+                    while i < n and p[i] == " ":
+                        i += 1
+                start = i
+                if i < n and p[i] in "'\"":
+                    q = p[i]
+                    i += 1
+                    while i < n and p[i] != "}" and p[i] != q:
+                        i += 1
+                    if i >= n or p[i] != q:
+                        warn("cannot interpret font name %s" % p[start:])
+                        break
+                    localfont = p[start + 1 : i]
+                    i += 1
+                else:
+                    while i < n and p[i] > " " and p[i] not in "=*}:":
+                        i += 1
+                    if i > start:
+                        localfont = p[start:i]
+                while i < n and p[i] in "=*:":
+                    ch = p[i]
+                    i += 1
+                    if ch in "=*":
+                        m = re.match(r"\s*[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?", p[i:])
+                        v = float(m.group(0)) if m else 0.0
+                        if m:
+                            i += len(m.group(0))
+                        if ch == "=":
+                            f = fontsize if v == 0 else v * 0.75
+                        else:
+                            f = v * fontsize if v else fontsize
+                    else:
+                        if p.startswith("Bold", i):
+                            isbold = True
+                        if p.startswith("Italic", i):
+                            isitalic = True
+                        if p.startswith("Normal", i):
+                            isnormal = True
+                        while i < n and p[i].isalpha():
+                            i += 1
+                if i < n and p[i] == "}":
+                    warn("bad syntax in enhanced text string")
+                if i < n and p[i] == " ":
+                    i += 1
+            isitalic = (wasitalic or isitalic) and not isnormal
+            isbold = (wasbold or isbold) and not isnormal
+            fname = (localfont if localfont else fontname).split(",")[0].split(":")[0]
+            if isbold:
+                fname += ":Bold"
+            if isitalic:
+                fname += ":Italic"
+            i = enhanced_recursion(p, i, True, fname, f, base, widthflag, showflag, overprint, sink)
+            sink.flush()
+        elif c == "@":
+            sink.flush()
+            sink.open(fontname, fontsize, base, widthflag, showflag, 3)
+            i = enhanced_recursion(p, i + 1, False, fontname, fontsize, base, widthflag, showflag, overprint, sink)
+            sink.open(fontname, fontsize, base, widthflag, showflag, 4)
+        elif c == "&":
+            sink.flush()
+            i = enhanced_recursion(p, i + 1, False, fontname, fontsize, base, widthflag, False, overprint, sink)
+        elif c == "~":
+            sink.flush()
+            i = enhanced_recursion(p, i + 1, False, fontname, fontsize, base, widthflag, showflag, 1, sink)
+            sink.flush()
+            if i + 1 >= n:
+                break
+            i = enhanced_recursion(p, i + 1, False, fontname, fontsize, base, False, showflag, 2, sink)
+            overprint = 0
+        elif c == "\\":
+            sink.open(fontname, fontsize, base, widthflag, showflag, overprint)
+            m = re.match(r"\\U\+([0-9a-fA-F]{4,5})", p[i:])
+            m8 = re.match(r"\\([0-7]{1,3})", p[i:])
+            if m:
+                sink.writec(chr(int(m.group(1)[:5], 16)))
+                i += len(m.group(0)) - 1
+            elif m8:
+                sink.writec(chr(int(m8.group(1), 8)))
+                i += len(m8.group(0)) - 1
+            else:
+                i += 1
+                if i >= n:
+                    warn("enhanced text parser -- spurious backslash")
+                    break
+                sink.writec(p[i])
+        else:
+            sink.open(fontname, fontsize, base, widthflag, showflag, overprint)
+            sink.writec(c)
+        if not brace:
+            sink.flush()
+            return i
+        if i < n:
+            i += 1
+    sink.flush()
+    return i
+
+
+def run_enhanced(text, sink):
+    i = 0
+    while True:
+        i = enhanced_recursion(text, i, True, "", FONTSIZE, 0.0, True, True, 0, sink)
+        sink.flush()
+        if i >= len(text):
+            break
+        i += 1  # skip a spurious closing brace
+        if i >= len(text):
+            break
+
+
+class EstimateSink:
+    # port of term/estimate.trm (character counting)
+    def __init__(self):
+        self.x = 0.0
+        self.xsave = 0.0
+        self.frag = 0.0
+        self.total = 0.0
+        self.opened = False
+        self.widthflag = True
+        self.overprint = 0
+        self.max_h = 12.0
+        self.min_h = 0.0
+
+    def track_height(self, base, fontsize):
+        pass
+
+    def open(self, fontname, fontsize, base, widthflag, showflag, overprint):
+        if overprint == 3:
+            self.xsave = self.x
+            return
+        if overprint == 4:
+            self.x = self.xsave
+            return
+        if not self.opened:
+            self.opened = True
+            self.frag = 0.0
+            fs = fontsize * 12.0 / FONTSIZE
+            b = base * 12.0 / FONTSIZE
+            self.max_h = max(self.max_h, b + fs)
+            self.min_h = min(self.min_h, b)
+            self.overprint = overprint
+            self.widthflag = widthflag
+
+    def flush(self):
+        if self.opened:
+            ln = self.frag
+            self.frag = 0.0
+            if not self.widthflag:
+                pass
+            elif self.overprint == 1:
+                self.x += ln / 2
+            else:
+                self.x += ln
+            self.total = max(self.total, self.x)
+            self.opened = False
+
+    def writec(self, c):
+        if c == "\n":
+            self.flush()
+            self.opened = True
+            self.min_h -= 12.0
+            self.x = 0
+        # default encoding: every byte counts as one character
+        self.frag += len(c.encode("utf-8", "replace"))
+
+
+def estimate_strlen(text):
+    if text is None:
+        return 0, 1.0
+    if not re.search(r"[{}^_@&~\n]", text) and not contains_unicode(text):
+        return len(text.encode("utf-8", "replace")), 1.0
+    s = EstimateSink()
+    run_enhanced(text, s)
+    ln = s.total
+    if 0.0 < s.x < 1.0:
+        ln = max(ln, 1)
+    h = int(10.0 * (s.max_h - s.min_h) / 12.0 + 0.5) / 10.0
+    return int(ln), h
+
+
+def label_width(text):
+    # returns (max line length, number of lines)
+    if not text:
+        return 0, 0
+    mlen = 0
+    l = 0
+    for line in text.split("\n"):
+        ln = estimate_strlen(line)[0]
+        mlen = max(mlen, ln)
+        if ln or l or text[0] == "\n":
+            l += 1
+    return mlen, l
+
+
+class LayoutSink:
+    # positions text fragments like the cairo terminal does
+    def __init__(self):
+        self.x = 0.0
+        self.frags = []
+        self.opened = False
+        self.buf = ""
+        self.save_active = False
+        self.save_start = 0.0
+        self.under_width = 0.0
+        self.under_start = 0.0
+
+    def track_height(self, base, fontsize):
+        pass
+
+    def open(self, fontname, fontsize, base, widthflag, showflag, overprint):
+        if overprint == 3:
+            self.save_active = True
+            self.save_start = self.x
+            return
+        if overprint == 4:
+            self.x = self.save_start
+            self.save_active = False
+            return
+        if not self.opened:
+            self.opened = True
+            self.buf = ""
+            self.fontname = fontname
+            self.fontsize = fontsize
+            self.base = base
+            self.widthflag = widthflag
+            self.showflag = showflag
+            self.overprint = overprint
+
+    def writec(self, c):
+        self.buf += c
+
+    def flush(self):
+        if not self.opened:
+            return
+        self.opened = False
+        s = self.buf
+        fontname = self.fontname
+        if fontname.split(":")[0] == "Symbol":
+            # cairo converts Symbol encoding to unicode and uses the "Sans" font
+            s = "".join(chr(SYMBOL_MAP.get(ord(ch), ord(ch))) if ord(ch) < 256 else ch for ch in s)
+            fontname = fontname.replace("Symbol", "Sans", 1)
+        size = self.fontsize * TEXT_SCALE
+        w = text_width(s, fontname, size)
+        x0 = self.x
+        if self.overprint == 2:
+            x0 = self.x - (self.under_width + w) / 2
+        if self.showflag and s:
+            self.frags.append((x0, self.base, s, fontname, size))
+        if self.overprint == 2:
+            self.x = x0 + (w if self.widthflag else 0.0) + self.under_width / 2
+        elif self.widthflag:
+            self.x = x0 + w
+        if self.overprint == 1:
+            self.under_width = w
+
+
+def layout_text(text):
+    if not re.search(r"[{}^_@&~\\()]", text):
+        size = FONTSIZE * TEXT_SCALE
+        return [(0.0, 0.0, text, "", size)], text_width(text, "", size)
+    s = LayoutSink()
+    run_enhanced(text, s)
+    return s.frags, s.x
+
+
+###############################################################################
+# gnuplot expressions (for functions, ranges and positions)
+###############################################################################
+def _is_int(v):
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
+# Expressions are evaluated with scalar libm functions (like gnuplot does);
+# numpy's vectorized versions are not always bit-identical.
+def _real(v):
+    return float(v)
+
+
+def _gdiv(a, b):
+    if _is_int(a) and _is_int(b):
+        if b == 0:
+            return float("nan")
+        q = abs(a) // abs(b)
+        return q if (a >= 0) == (b >= 0) else -q
+    if b == 0:
+        return float("nan")
+    return a / b
+
+
+def _gmod(a, b):
+    if _is_int(a) and _is_int(b):
+        if b == 0:
+            return float("nan")
+        return int(math.fmod(a, b))
+    raise GnuplotError("can only mod ints")
+
+
+def _gpow(a, b):
+    if _is_int(a) and _is_int(b):
+        if b >= 0:
+            return a ** b
+        if a == 0:
+            return float("nan")
+        return 1.0 / (a ** (-b))
+    return math.pow(a, b)
+
+
+def _gint(v):
+    if _is_int(v):
+        return v
+    if not math.isfinite(v):
+        return float("nan")
+    return int(v)
+
+
+def _sgn(v):
+    return (v > 0) - (v < 0)
+
+
+GP_NAMESPACE = {
+    "pi": math.pi,
+    "NaN": float("nan"),
+    "abs": abs,
+    "sgn": _sgn,
+    "sqrt": math.sqrt,
+    "exp": math.exp,
+    "log": math.log,
+    "log10": math.log10,
+    "sin": math.sin,
+    "cos": math.cos,
+    "tan": math.tan,
+    "asin": math.asin,
+    "acos": math.acos,
+    "atan": math.atan,
+    "atan2": math.atan2,
+    "sinh": math.sinh,
+    "cosh": math.cosh,
+    "tanh": math.tanh,
+    "asinh": math.asinh,
+    "acosh": math.acosh,
+    "atanh": math.atanh,
+    "floor": lambda v: float(math.floor(v)),
+    "ceil": lambda v: float(math.ceil(v)),
+    "int": _gint,
+    "real": _real,
+    "imag": lambda v: 0.0,
+    "gamma": math.gamma,
+    "lgamma": math.lgamma,
+    "erf": math.erf,
+    "erfc": math.erfc,
+    "norm": lambda v: 0.5 * math.erfc(-v / math.sqrt(2.0)),
+    "_gdiv": _gdiv,
+    "_gmod": _gmod,
+    "_gpow": _gpow,
+    "_and": lambda a, b: int(bool(a) and bool(b)),
+    "_or": lambda a, b: int(bool(a) or bool(b)),
+    "_not": lambda a: int(not a),
+    "_inttype": int,
+}
+
+
+class _GpTransform(ast.NodeTransformer):
+    def visit_BinOp(self, node):
+        self.generic_visit(node)
+        fn = {ast.Div: "_gdiv", ast.Mod: "_gmod", ast.Pow: "_gpow"}.get(type(node.op))
+        if fn:
+            return ast.copy_location(
+                ast.Call(func=ast.Name(id=fn, ctx=ast.Load()), args=[node.left, node.right], keywords=[]),
+                node,
+            )
+        return node
+
+    def visit_BoolOp(self, node):
+        self.generic_visit(node)
+        fn = "_and" if isinstance(node.op, ast.And) else "_or"
+        r = node.values[0]
+        for v in node.values[1:]:
+            r = ast.Call(func=ast.Name(id=fn, ctx=ast.Load()), args=[r, v], keywords=[])
+        return ast.copy_location(r, node)
+
+    def visit_UnaryOp(self, node):
+        self.generic_visit(node)
+        if isinstance(node.op, ast.Not):
+            return ast.copy_location(
+                ast.Call(func=ast.Name(id="_not", ctx=ast.Load()), args=[node.operand], keywords=[]),
+                node,
+            )
+        return node
+
+    def visit_Compare(self, node):
+        # gnuplot comparisons yield the integers 0 or 1
+        self.generic_visit(node)
+        return ast.copy_location(
+            ast.Call(func=ast.Name(id="_inttype", ctx=ast.Load()), args=[node], keywords=[]), node
+        )
+
+
+_expr_cache = {}
+
+
+def gp_compile(expr):
+    if expr in _expr_cache:
+        return _expr_cache[expr]
+    s = expr.strip()
+    s = s.replace("&&", " and ").replace("||", " or ")
+    s = re.sub(r"!(?!=)", " not ", s)
+    try:
+        tree = ast.parse(s, mode="eval")
+    except SyntaxError:
+        raise GnuplotError("invalid expression '%s'" % expr)
+    tree = ast.fix_missing_locations(_GpTransform().visit(tree))
+    code = compile(tree, "<gnuplot expression>", "eval")
+    _expr_cache[expr] = code
+    return code
+
+
+def gp_eval(expr, x=None):
+    # returns a float (nan if undefined)
+    code = gp_compile(expr)
+    ns = dict(GP_NAMESPACE)
+    if x is not None:
+        ns["x"] = x
+    try:
+        v = eval(code, {"__builtins__": {}}, ns)
+    except NameError:
+        raise GnuplotError("undefined variable in '%s'" % expr)
+    except (ZeroDivisionError, OverflowError, ValueError, TypeError):
+        return float("nan")
+    if isinstance(v, complex):
+        return float("nan")
+    try:
+        return float(v)
+    except (TypeError, ValueError, OverflowError):
+        return float("nan")
+
+
+def gp_eval_scalar(expr):
+    v = gp_eval(expr)
+    if not math.isfinite(v):
+        raise GnuplotError("expression '%s' is undefined" % expr)
+    return v
+
+
+###############################################################################
+# gnuplot state
+###############################################################################
+class AxisSettings:
+    def __init__(self, name):
+        self.name = name
+        self.auto_min = True
+        self.auto_max = True
+        self.set_min = -10.0
+        self.set_max = 10.0
+        # autoscale state of the most recent plot (gnuplot's axis->autoscale)
+        self.runtime_auto_min = True
+        self.log = False
+        self.base = 10.0
+        self.label = None
+        self.tics_user = None  # list of (position, label) or None for automatic
+        self.tic_rotate = 0
+
+
+class KeySettings:
+    def __init__(self):
+        self.visible = True
+        self.region = "interior"  # interior, exterior, margin, user
+        self.margin = None
+        self.vpos = JUST_TOP
+        self.hpos = RIGHT
+        self.just = RIGHT
+        self.reverse = False
+        self.invert = False
+        self.stack_vertical = True
+        self.box = False
+        self.box_lw = 1.0
+        self.swidth = 4.0
+        self.vert_factor = 1.0
+        self.width_fix = 0.0
+        self.height_fix = 0.0
+        self.title = None
+        self.front = False
+        self.maxrows = 0
+        self.maxcols = 0
+        self.user_cols = 0
+        self.user_pos = None
+
+
+class State:
+    def __init__(self):
+        self.x = AxisSettings("x")
+        self.y = AxisSettings("y")
+        self.key = KeySettings()
+        self.arrows = []
+        self.xmap = None
+
+
+def gp_tokens(s):
+    # rough gnuplot tokenizer: numbers, names, strings, punctuation
+    toks = []
+    i = 0
+    n = len(s)
+    while i < n:
+        c = s[i]
+        if c.isspace():
+            i += 1
+        elif c in "'\"":
+            j = i + 1
+            while j < n and s[j] != c:
+                j += 1
+            toks.append(s[i : j + 1])
+            i = j + 1
+        elif c.isalpha() or c == "_":
+            j = i
+            while j < n and (s[j].isalnum() or s[j] in "_$"):
+                j += 1
+            toks.append(s[i:j])
+            i = j
+        elif c.isdigit() or (c == "." and i + 1 < n and s[i + 1].isdigit()):
+            m = re.match(r"(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?", s[i:])
+            toks.append(m.group(0))
+            i += len(m.group(0))
+        else:
+            toks.append(c)
+            i += 1
+    return toks
+
+
+def almost_equals(tok, pattern):
+    # gnuplot's abbreviation matching: "t$op" matches t, to, top
+    if "$" not in pattern:
+        return tok == pattern
+    a, b = pattern.split("$")
+    full = a + b
+    return tok.startswith(a) and full.startswith(tok)
+
+
+def unquote(tok):
+    if len(tok) >= 2 and tok[0] == tok[-1] and tok[0] in "'\"":
+        s = tok[1:-1]
+        if tok[0] == '"':
+            s = parse_esc(s)
+        else:
+            s = s.replace("''", "'")
+        return s
+    return tok
+
+
+def parse_esc(s):
+    # port of util.c:parse_esc (double quoted strings)
+    out = []
+    i = 0
+    n = len(s)
+    while i < n:
+        if s[i] == "\\":
+            i += 1
+            if i >= n:
+                break
+            c = s[i]
+            if c == "\\":
+                out.append("\\")
+                i += 1
+            elif c == "n":
+                out.append("\n")
+                i += 1
+            elif c == "r":
+                out.append("\r")
+                i += 1
+            elif c == "t":
+                out.append("\t")
+                i += 1
+            elif c == '"':
+                out.append('"')
+                i += 1
+            elif "0" <= c <= "7":
+                m = re.match(r"[0-7]{1,4}" if c == "0" else r"[0-7]{1,3}", s[i:])
+                out.append(chr(int(m.group(0), 8) & 0xFF))
+                i += len(m.group(0))
+            elif c == "U" and i + 1 < n and s[i + 1] == "+":
+                out.append("\\")
+        else:
+            out.append(s[i])
+            i += 1
+    return "".join(out)
+
+
+KEY_TABLE = [
+    ("def$ault", "default"), ("on", "on"), ("off", "off"), ("offset", "offset"),
+    ("t$op", "top"), ("b$ottom", "bottom"), ("l$eft", "left"), ("r$ight", "right"),
+    ("c$enter", "center"), ("ver$tical", "vertical"), ("hor$izontal", "horizontal"),
+    ("ov$er", "over"), ("ab$ove", "above"), ("u$nder", "under"), ("be$low", "below"),
+    ("at", "at"), ("ins$ide", "inside"), ("o$utside", "outside"), ("fix$ed", "fixed"),
+    ("tm$argin", "tmargin"), ("bm$argin", "bmargin"), ("lm$argin", "lmargin"),
+    ("rm$argin", "rmargin"), ("L$eft", "Left"), ("R$ight", "Right"),
+    ("rev$erse", "reverse"), ("norev$erse", "noreverse"), ("inv$ert", "invert"),
+    ("noinv$ert", "noinvert"), ("enh$anced", "enhanced"), ("noenh$anced", "noenhanced"),
+    ("b$ox", "box"), ("nob$ox", "nobox"), ("sa$mplen", "samplen"), ("sp$acing", "spacing"),
+    ("w$idth", "width"), ("h$eight", "height"), ("keyw$idth", "keywidth"),
+    ("a$utotitles", "autotitles"), ("noa$utotitles", "noautotitles"), ("ti$tle", "title"),
+    ("noti$tle", "notitle"), ("font", "font"), ("tc", "textcolor"), ("text$color", "textcolor"),
+    ("col$s", "cols"), ("colu$mns", "cols"), ("maxcol$s", "maxcols"), ("maxcolu$mns", "maxcols"),
+    ("maxrow$s", "maxrows"), ("opaque", "front"), ("noopaque", "nofront"),
+]
+
+
+def set_key(key, s):
+    toks = gp_tokens(s)
+    key.visible = True
+    vpos_set = hpos_set = sdir_set = False
+    i = 0
+
+    def number(i):
+        # parse a (possibly signed) numeric expression token sequence
+        j = i
+        expr = ""
+        while j < len(toks) and not re.match(r"^[A-Za-z]", toks[j]) and toks[j] != ",":
+            expr += toks[j]
+            j += 1
+        return gp_eval_scalar(expr), j
+
+    while i < len(toks):
+        tok = toks[i]
+        opt = None
+        for pat, name in KEY_TABLE:
+            if almost_equals(tok, pat):
+                opt = name
+                break
+        if opt is None:
+            raise GnuplotError("unknown key option '%s'" % tok)
+        if opt == "on":
+            key.visible = True
+        elif opt == "off":
+            key.visible = False
+        elif opt == "default":
+            nk = KeySettings()
+            key.__dict__.update(nk.__dict__)
+        elif opt == "top":
+            key.vpos = JUST_TOP
+            vpos_set = True
+        elif opt == "bottom":
+            key.vpos = JUST_BOT
+            vpos_set = True
+        elif opt == "left":
+            key.hpos = LEFT
+            hpos_set = True
+        elif opt == "right":
+            key.hpos = RIGHT
+            hpos_set = True
+        elif opt == "center":
+            if not vpos_set:
+                key.vpos = JUST_CENTRE
+            if not hpos_set:
+                key.hpos = CENTRE
+            if vpos_set or hpos_set:
+                vpos_set = hpos_set = True
+        elif opt == "vertical":
+            key.stack_vertical = True
+            sdir_set = True
+        elif opt == "horizontal":
+            key.stack_vertical = False
+            sdir_set = True
+        elif opt in ("over", "above", "under", "below"):
+            if not hpos_set:
+                key.hpos = CENTRE
+            if not sdir_set:
+                key.stack_vertical = False
+            key.region = "margin"
+            key.margin = "t" if opt in ("over", "above") else "b"
+        elif opt == "inside" or opt == "fixed":
+            key.region = "interior"
+        elif opt == "outside":
+            key.region = "exterior"
+        elif opt in ("tmargin", "bmargin", "lmargin", "rmargin"):
+            key.region = "margin"
+            key.margin = opt[0]
+        elif opt == "Left":
+            key.just = LEFT
+        elif opt == "Right":
+            key.just = RIGHT
+        elif opt == "reverse":
+            key.reverse = True
+        elif opt == "noreverse":
+            key.reverse = False
+        elif opt == "invert":
+            key.invert = True
+        elif opt == "noinvert":
+            key.invert = False
+        elif opt in ("enhanced", "noenhanced", "autotitles", "noautotitles"):
+            pass
+        elif opt == "box":
+            key.box = True
+            while i + 2 < len(toks) and toks[i + 1] in ("lw", "linewidth", "lt", "linetype", "lc", "linecolor", "dt"):
+                if toks[i + 1] in ("lw", "linewidth"):
+                    key.box_lw, j = number(i + 2)
+                    i = j - 1
+                else:
+                    i += 2
+        elif opt == "nobox":
+            key.box = False
+        elif opt in ("samplen", "spacing", "width", "height", "maxrows", "maxcols", "cols"):
+            v, j = number(i + 1)
+            i = j - 1
+            if opt == "samplen":
+                key.swidth = v
+            elif opt == "spacing":
+                key.vert_factor = max(v, 0.0)
+            elif opt == "width":
+                key.width_fix = v
+            elif opt == "height":
+                key.height_fix = v
+            elif opt == "maxrows":
+                key.maxrows = max(int(v), 0)
+            elif opt == "maxcols":
+                key.maxcols = max(int(v), 0)
+            elif opt == "cols":
+                key.user_cols = min(max(int(v), 0), 100)
+        elif opt == "title":
+            if i + 1 < len(toks) and toks[i + 1][:1] in "'\"":
+                key.title = unquote(toks[i + 1])
+                i += 1
+            else:
+                key.title = None
+        elif opt == "notitle":
+            key.title = None
+        elif opt == "font":
+            i += 1
+            warn("key font is ignored")
+        elif opt == "textcolor":
+            warn("key textcolor is ignored")
+            while i + 1 < len(toks) and not any(almost_equals(toks[i + 1], p) for p, _ in KEY_TABLE):
+                i += 1
+        elif opt == "front":
+            key.front = True
+        elif opt == "nofront":
+            key.front = False
+        elif opt == "at":
+            j = i + 1
+            coords = []
+            for _ in range(2):
+                system = "first"
+                if j < len(toks) and toks[j] in ("first", "second", "graph", "screen", "character"):
+                    system = toks[j]
+                    j += 1
+                v, j = number(j)
+                coords.append((system, v))
+                if j < len(toks) and toks[j] == ",":
+                    j += 1
+            key.user_pos = coords
+            key.region = "user"
+            i = j - 1
+        elif opt in ("offset", "keywidth"):
+            warn("key %s is ignored" % opt)
+            j = i + 1
+            while j < len(toks) and not re.match(r"^[A-Za-z]", toks[j]) or (j < len(toks) and toks[j] in ("first", "second", "graph", "screen", "character")):
+                j += 1
+            i = j - 1
+        i += 1
+    if key.region == "exterior":
+        if key.stack_vertical:
+            key.margin = {LEFT: "l", RIGHT: "r"}.get(key.hpos, "t" if key.vpos == JUST_TOP else "b")
+        else:
+            key.margin = {JUST_TOP: "t", JUST_BOT: "b"}.get(key.vpos, "l" if key.hpos == LEFT else "r")
+
+
+def set_range(ax, lo, hi):
+    for which, v in (("min", lo), ("max", hi)):
+        v = v.strip()
+        if v == "":
+            continue
+        if v == "*":
+            setattr(ax, "auto_" + which, True)
+        else:
+            setattr(ax, "set_" + which, gp_eval_scalar(v))
+            setattr(ax, "auto_" + which, False)
+    if ax.log and not (ax.set_min > 0 and ax.set_max > 0):
+        # clone_linked_axes: forgive a bad minimum if it was autoscaled so far
+        if ax.runtime_auto_min and ax.set_min <= 0 and ax.set_max > 0.1:
+            ax.set_min = 0.1
+        else:
+            warn("warning: could not confirm linked axis inverse mapping function")
+
+
+def set_logscale(st, spec):
+    m = re.match(r"^\s*([a-z0-9]*)\s*(.*)$", spec)
+    axes = m.group(1)
+    base = gp_eval_scalar(m.group(2)) if m.group(2).strip() else 10.0
+    if base <= 1.0:
+        raise GnuplotError("log base must be > 1.0")
+    if axes == "":
+        axes = "xy"
+    for c in re.findall(r"[xy]2?|[zr]|cb", axes):
+        if c in ("x", "y"):
+            ax = getattr(st, c)
+            ax.log = True
+            ax.base = base
+            # set.c:set_logscale avoids invalid (e.g. default) ranges
+            if ax.set_min <= 0 and ax.set_max > 0:
+                ax.set_min = 0.1
+            if (ax.auto_min or ax.auto_max) and (ax.set_min <= 0 or ax.set_max <= 0):
+                ax.set_min = 0.1
+                ax.set_max = 10.0
+        else:
+            warn("logscale %s is ignored" % c)
+
+
+###############################################################################
+# line/point properties
+###############################################################################
+class LP:
+    def __init__(self):
+        self.l_type = 0
+        self.color = (0, 0, 0)
+        self.lw = 1.0
+        self.p_type = 0
+        self.ps = 1.0
+
+    def copy(self):
+        o = LP()
+        o.__dict__.update(self.__dict__)
+        return o
+
+
+def rgb(v):
+    return ((v >> 16) & 255) / 255.0, ((v >> 8) & 255) / 255.0, (v & 255) / 255.0
+
+
+def load_linetype(lp, tag):
+    recycled = False
+    while True:
+        if 1 <= tag <= 8:
+            lp.l_type = tag - 1
+            lp.lw = 1.0
+            lp.color = rgb(DEFAULT_COLORS[tag - 1])
+            if not recycled:
+                lp.p_type = tag - 1
+                lp.ps = 1.0
+            return
+        if tag > 8:
+            tag = (tag - 1) % 8 + 1
+            recycled = True
+            continue
+        lp.l_type = tag - 1
+        lp.p_type = -1
+        lp.color = (1, 1, 1) if lp.l_type == LT_BACKGROUND else (0, 0, 0)
+        return
+
+
+def parse_color(toks, i):
+    # toks[i] is the token after lc/linecolor
+    if i < len(toks) and toks[i] in ("rgb", "rgbcolor"):
+        i += 1
+    if i < len(toks) and toks[i][:1] in "'\"":
+        name = unquote(toks[i])
+        i += 1
+        if name.startswith("#") or name.startswith("0x"):
+            h = name[1:] if name.startswith("#") else name[2:]
+            if len(h) == 8:
+                h = h[2:]
+            return rgb(int(h, 16)), i
+        if name in COLOR_NAMES:
+            return rgb(COLOR_NAMES[name]), i
+        raise GnuplotError("unrecognized color name '%s'" % name)
+    if i < len(toks):
+        v = toks[i]
+        i += 1
+        if re.match(r"^\d+$", v):
+            tmp = LP()
+            load_linetype(tmp, int(v))
+            return tmp.color, i
+    raise GnuplotError("unrecognized color specification")
+
+
+def parse_lp(elem_index, spec):
+    # default properties of the plot element and lp_parse of the user spec
+    lp = LP()
+    lp.l_type = elem_index
+    lp.p_type = elem_index
+    load_linetype(lp, elem_index + 1)
+    toks = gp_tokens(spec)
+    explicit = {}
+    i = 0
+
+    def number(i):
+        expr = ""
+        j = i
+        while j < len(toks) and not re.match(r"^[A-Za-z]", toks[j]):
+            expr += toks[j]
+            j += 1
+        return gp_eval_scalar(expr), j
+
+    while i < len(toks):
+        t = toks[i]
+        if almost_equals(t, "linet$ype") or t == "lt":
+            v, i = number(i + 1)
+            load_linetype(lp, int(v))
+        elif almost_equals(t, "linew$idth") or t == "lw":
+            explicit["lw"], i = number(i + 1)
+        elif almost_equals(t, "pointt$ype") or t == "pt":
+            v, i = number(i + 1)
+            explicit["p_type"] = int(v) - 1
+        elif almost_equals(t, "points$ize") or t == "ps":
+            explicit["ps"], i = number(i + 1)
+        elif almost_equals(t, "linec$olor") or t == "lc":
+            explicit["color"], i = parse_color(toks, i + 1)
+        elif almost_equals(t, "dasht$ype") or t == "dt":
+            v, i = number(i + 1)
+            if int(v) != 1:
+                warn("dashtype %d is drawn solid" % int(v))
+        else:
+            raise GnuplotError("unexpected line property '%s'" % t)
+    for k, v in explicit.items():
+        setattr(lp, k, v)
+    return lp
+
+
+###############################################################################
+# plot elements
+###############################################################################
+class Elem:
+    def __init__(self, kind, style, source, cols, lp_spec, title):
+        self.kind = kind  # 'data' or 'func'
+        self.style = style  # 'yerr', 'xyerr', 'points', 'filled', 'lines'
+        self.source = source  # file name or function expression
+        self.cols = cols  # using specification
+        self.lp_spec = lp_spec
+        self.title = title  # None -> notitle
+        self.xmap = False
+
+
+def read_datafile(fname):
+    rows = []
+    for line in open(fname):
+        line = line.strip()
+        if line == "" or line[0] == "#":
+            continue
+        rows.append(line.split())
+    return rows
+
+
+def column(row, c):
+    try:
+        v = row[c - 1]
+    except IndexError:
+        return None
+    try:
+        return float(v)
+    except ValueError:
+        return None
+
+
+def apply_xmap(xmap, x):
+    if xmap is None:
+        return x
+    T, T2 = xmap
+    d = T2 - T
+    v = x + d
+    if not math.isfinite(v):
+        return float("nan")
+    return float(int(math.fmod(int(v), T2)) - d)
+
+
+class Axis:
+    # runtime copy of an axis during one plot
+    def __init__(self, s, reset_autoscale=True):
+        self.s = s
+        self.log = s.log
+        self.base = s.base
+        self.log_base = math.log(s.base)
+        self.auto_min = s.auto_min
+        self.auto_max = s.auto_max
+        self.set_min = s.set_min
+        self.set_max = s.set_max
+        # axis_init: x starts from the set range and is only reset by data
+        self.min = VERYLARGE if (reset_autoscale and s.auto_min) else s.set_min
+        self.max = -VERYLARGE if (reset_autoscale and s.auto_max) else s.set_max
+        self.pmin = self.pmax = 0.0
+        self.ticstep = 1.0
+        self.ticfmt = "% h"
+        self.user_tics = s.tics_user
+        self.tic_rotate = s.tic_rotate
+        self.force_linear = False  # ticdef.force_linear_tics (gnuplot 6.0.2)
+        self.data_min = VERYLARGE
+        self.data_max = -VERYLARGE
+        self.used = False
+
+    def to_primary(self, v):
+        if v <= 0:
+            return float("nan")
+        return math.log(v) / self.log_base
+
+    def from_primary(self, v):
+        return math.exp(v * self.log_base)
+
+    def store(self, curval, ptype):
+        # port of axis.c:store_and_update_range; returns (new type, status)
+        if not (curval > -VERYLARGE and curval < VERYLARGE):
+            return UNDEFINED, UNDEFINED
+        if self.log:
+            if curval < 0.0:
+                return UNDEFINED, UNDEFINED
+            elif curval == 0.0:
+                return OUTRANGE, OUTRANGE
+        if ptype != INRANGE:
+            return ptype, 0
+        if curval < self.min and (curval <= self.max or self.max == -VERYLARGE):
+            if self.auto_min:
+                self.min = curval
+            elif curval != self.max:
+                return OUTRANGE, OUTRANGE
+        if curval > self.max and (curval >= self.min or self.min == VERYLARGE):
+            if self.auto_max:
+                self.max = curval
+            elif curval != self.min:
+                ptype = OUTRANGE
+        if ptype == INRANGE:
+            self.data_min = min(self.data_min, curval)
+            self.data_max = max(self.data_max, curval)
+        return ptype, 0
+
+    def check_empty_range(self, mesg):
+        if self.min >= VERYLARGE or self.max <= -VERYLARGE:
+            if mesg:
+                raise GnuplotError(mesg)
+        if self.max - self.min == 0.0:
+            if self.auto_min or self.auto_max:
+                widen = 1.0 if self.max == 0.0 else 0.01 * abs(self.max)
+                msg = "Warning: empty %s range [%g:%g], " % (self.s.name, self.min, self.max)
+                if self.auto_min:
+                    self.min -= widen
+                if self.auto_max:
+                    self.max += widen
+                warn(msg + "adjusting to [%g:%g]" % (self.min, self.max))
+            else:
+                raise GnuplotError("Can't plot with an empty %s range!" % self.s.name)
+
+    def check_log_limits(self):
+        if self.log and (self.min <= 0 or self.max <= 0):
+            raise GnuplotError(
+                "%s range must be greater than 0 for log scale" % self.s.name
+            )
+
+    def update_primary(self):
+        if self.log:
+            self.pmin = self.to_primary(self.min)
+            self.pmax = self.to_primary(self.max)
+
+    def extend_log(self):
+        # extend_primary_ticrange
+        if not self.log:
+            return
+        if self.auto_min or abs(self.pmin - math.floor(self.pmin)) < ZERO:
+            self.pmin = math.floor(self.pmin)
+            self.min = self.from_primary(self.pmin)
+        if self.auto_max or abs(self.pmax - math.ceil(self.pmax)) < ZERO:
+            self.pmax = math.ceil(self.pmax)
+            self.max = self.from_primary(self.pmax)
+
+    def set_scale(self, lower, upper):
+        self.term_lower = lower
+        self.term_upper = upper
+        if self.log:
+            self.term_scale = (upper - lower) / (self.pmax - self.pmin)
+        else:
+            self.term_scale = (upper - lower) / (self.max - self.min)
+
+    def map_double(self, v):
+        if self.log:
+            if not v > 0:
+                return float("nan")
+            v = math.log(v) / self.log_base
+            return self.term_lower + (v - self.pmin) * self.term_scale
+        return self.term_lower + (v - self.min) * self.term_scale
+
+    def map(self, v):
+        # axis_map_toint: gnuplot works with integer terminal coordinates
+        d = self.map_double(v)
+        if not math.isfinite(d) or abs(d) > 1e15:
+            return d
+        return int(d + 0.5)
+
+
+def quantize_normal_tics(arg, guide):
+    power = 10.0 ** math.floor(math.log10(arg))
+    xnorm = arg / power
+    posns = guide / xnorm
+    if posns > 40:
+        tics = 0.05
+    elif posns > 20:
+        tics = 0.1
+    elif posns > 10:
+        tics = 0.2
+    elif posns > 4:
+        tics = 0.5
+    elif posns > 2:
+        tics = 1
+    elif posns > 0.5:
+        tics = 2
+    else:
+        tics = math.ceil(xnorm)
+    return tics * power
+
+
+def make_tics(lo, hi, log, guide=20, force_linear=False):
+    xr = abs(lo - hi)
+    if xr == 0:
+        return 1
+    tic = quantize_normal_tics(xr, guide)
+    if log and tic < 1.0 and not force_linear:
+        tic = 1.0
+    return tic
+
+
+def setup_tics(ax):
+    autoextend_min = ax.auto_min and not ax.log
+    autoextend_max = ax.auto_max and not ax.log
+    if ax.user_tics is None:
+        ax.ticstep = make_tics(ax.min, ax.max, ax.log, force_linear=ax.force_linear)
+    else:
+        autoextend_min = autoextend_max = False
+    if autoextend_min:
+        up = not (ax.min < ax.max)
+        ax.min = ax.ticstep * (math.ceil(ax.min / ax.ticstep) if up else math.floor(ax.min / ax.ticstep))
+    if autoextend_max:
+        up = ax.min < ax.max
+        ax.max = ax.ticstep * (math.ceil(ax.max / ax.ticstep) if up else math.floor(ax.max / ax.ticstep))
+    # copy_or_invent_formatstring: ensure enough precision to distinguish tics
+    ax.ticfmt = "% h"
+    d = min(abs(ax.max - ax.min), abs(ax.min))
+    if ax.min * ax.max > 0 and d > 0:
+        precision = math.ceil(-math.log10(d))
+        if 4 < precision < 10:
+            ax.ticfmt = "%%.%df" % precision
+
+
+def gprintf(fmt, x):
+    if fmt == "% h":
+        s = "% g" % x
+        m = re.match(r"^(.*?)[eE]([-+]?)(\d+)$", s)
+        if m:
+            e = m.group(3).lstrip("0")
+            s = m.group(1) + "x10^{" + ("-" if m.group(2) == "-" else "") + e + "}"
+        return s
+    return fmt % x
+
+
+def gen_tics(ax, callback):
+    # port of axis.c:gen_tics for computed/user tics on linear and log axes
+    if ax.user_tics is not None:
+        uncertain = 0 if ax.log else (ax.max - ax.min) / 10
+        imin = ax.min - SIGNIF * uncertain
+        imax = ax.max + SIGNIF * uncertain
+        for pos, label in ax.user_tics:
+            if not inrange(pos, imin, imax):
+                continue
+            callback(ax, pos, label, 0)
+        return
+    lmin, lmax = ax.min, ax.max
+    logtics = ax.log and not ax.force_linear
+    if logtics:
+        lmin, lmax = ax.pmin, ax.pmax
+        if lmin > lmax:
+            lmin, lmax = lmax, lmin
+        ax.ticstep = make_tics(ax.pmin, ax.pmax, False)
+        if ax.ticstep < 1.0:
+            ax.ticstep = 1.0
+    if lmin > lmax:
+        lmin, lmax = lmax, lmin
+    step = ax.ticstep
+    start = step * math.floor(lmin / step)
+    end = step * math.ceil(lmax / step)
+    if start > end:
+        start, end = end, start
+    step = abs(step)
+    minitics = logtics
+    if minitics:
+        ministart = ministep = step / (ax.base - 1)
+        miniend = step
+    end += SIGNIF * step
+    if step < (abs(lmax) + abs(lmin)):
+        internal_max = lmax + step * SIGNIF
+        internal_min = lmin - step * SIGNIF
+    else:
+        internal_max = lmax
+        internal_min = lmin
+    if step == 0:
+        return
+    if (internal_max - internal_min) / step > T_XMAX:
+        warn("Too many axis ticks requested (>%.0g)" % ((internal_max - internal_min) / step))
+        return
+    nsteps = 0
+    prev = start - step
+    t = start
+    while t <= end:
+        if abs(t - prev) < step / 4.0:
+            step = end - start
+            nsteps = 2
+            warn("tick interval too small for machine precision")
+            break
+        prev = t
+        nsteps += 1
+        t += step
+    tic = start
+    while nsteps > 0:
+        if logtics:
+            user = ax.from_primary(tic)
+            internal = tic
+        elif ax.log:
+            # log axis with linear tic intervals
+            user = internal = tic
+        else:
+            internal = tic
+            user = 0.0 if abs(internal) < step * SIGNIF else internal
+        if internal > internal_max:
+            break
+        if internal >= internal_min:
+            label = gprintf(ax.ticfmt, user)
+            position = user if ax.log else internal
+            callback(ax, position, label, 0)
+        if minitics:
+            if step > 1:
+                # minitics only at the otherwise unmarked decades
+                ministart, ministep, miniend = internal, 1, internal + step
+            mplace = ministart
+            while mplace < miniend:
+                if step > 1:
+                    mtic_user = ax.from_primary(mplace)
+                    mtic_internal = mplace
+                else:
+                    this_major = ax.from_primary(internal)
+                    next_major = ax.from_primary(internal + step)
+                    mtic_user = this_major + mplace / miniend * (next_major - this_major)
+                    mtic_internal = ax.to_primary(mtic_user)
+                if inrange(mtic_internal, internal_min, internal_max) and inrange(
+                    mtic_internal, start - step * SIGNIF, end + step * SIGNIF
+                ):
+                    callback(ax, mtic_user, None, 1)
+                mplace += ministep
+        tic += step
+        nsteps -= 1
+
+
+###############################################################################
+# drawing helpers (matplotlib)
+###############################################################################
+class Canvas:
+    def __init__(self):
+        self.fig = Figure(figsize=(PAGE_W / 72.0, PAGE_H / 72.0), dpi=72)
+        # page points -> display; transFigure follows the crop box when saving
+        self.trans = Affine2D().scale(1.0 / PAGE_W, 1.0 / PAGE_H) + self.fig.transFigure
+        self.z = 0
+        self.clip = None
+        self.clip_pt = None
+        self.ink = []  # bounding boxes (x0, y0, x1, y1) of all non-white marks, in points
+
+    def set_clip(self, bounds):
+        # bounds in terminal units (xleft, ybot, xright, ytop) or None
+        if bounds is None:
+            self.clip = None
+            self.clip_pt = None
+        else:
+            xl, yb, xr, yt = bounds
+            self.clip_pt = (u2pt(xl), u2pt(yb), u2pt(xr), u2pt(yt))
+            self.clip = TransformedBbox(
+                Bbox.from_extents(u2pt(xl), u2pt(yb), u2pt(xr), u2pt(yt)), self.trans
+            )
+
+    def _add(self, artist, clip=True):
+        self.z += 1
+        artist.set_zorder(self.z)
+        if clip and self.clip is not None:
+            artist.set_clip_box(self.clip)
+            artist.set_clip_on(True)
+        else:
+            artist.set_clip_on(False)
+        self.fig.add_artist(artist)
+
+    def _record(self, box, clip):
+        if box is None:
+            return
+        if clip and self.clip_pt is not None:
+            c = self.clip_pt
+            box = (max(box[0], c[0]), max(box[1], c[1]), min(box[2], c[2]), min(box[3], c[3]))
+        if box[0] < box[2] and box[1] < box[3]:
+            self.ink.append(box)
+
+    def _record_segments(self, segs, color, lw, clip):
+        # segs: list of ((x0, y0), (x1, y1)) in points, stroked with butt caps
+        if _is_white(color):
+            return
+        hw = 0.5 * lw * LW_SCALE
+        c = self.clip_pt if clip else None
+        for (a, b) in segs:
+            if c is not None:
+                cl = clip_segment(a, b, c)
+                if cl is None:
+                    continue
+                a, b = cl
+            dx, dy = b[0] - a[0], b[1] - a[1]
+            ln = math.hypot(dx, dy)
+            if ln == 0:
+                continue
+            ex, ey = hw * abs(dy) / ln, hw * abs(dx) / ln
+            self._record((min(a[0], b[0]) - ex, min(a[1], b[1]) - ey, max(a[0], b[0]) + ex, max(a[1], b[1]) + ey), clip)
+
+    def _clip_polylines(self, xs, ys, clip):
+        # draw_clip_line: gnuplot clips the line geometry (not the stroke)
+        # to the clip area; returns polylines in points
+        box = self.clip_pt if clip else None
+        out = []
+        cur = None
+        for i in range(len(xs) - 1):
+            a = (xs[i], ys[i])
+            b = (xs[i + 1], ys[i + 1])
+            if not all(math.isfinite(v) for v in a + b):
+                cur = None
+                continue
+            if box is not None:
+                c = clip_segment(a, b, box)
+                if c is None:
+                    cur = None
+                    continue
+            else:
+                c = (a, b)
+            if cur is not None and cur[-1] == c[0]:
+                cur.append(c[1])
+            else:
+                cur = [c[0], c[1]]
+                out.append(cur)
+        return out
+
+    def _draw_polylines(self, lines, color, lw, dash):
+        if not lines:
+            return
+        self._record_segments([(l[i], l[i + 1]) for l in lines for i in range(len(l) - 1)], color, lw, False)
+        lc = LineCollection(
+            lines, transform=self.trans, colors=[color], linewidths=[lw * LW_SCALE],
+            capstyle="butt", joinstyle="miter",
+        )
+        if dash is not None:
+            lc.set_linestyle((0, dash))
+        self._add(lc, False)
+
+    def lines(self, xs, ys, color, lw, dash=None, clip=True):
+        # polyline in terminal units; NaN breaks the line
+        xs = [v / SCALE + 0.5 for v in xs]
+        ys = [v / SCALE + 0.5 for v in ys]
+        self._draw_polylines(self._clip_polylines(xs, ys, clip), color, lw, dash)
+
+    def segments(self, segs, color, lw, dash=None, clip=True):
+        lines = []
+        for (a, b) in segs:
+            lines += self._clip_polylines(
+                [a[0] / SCALE + 0.5, b[0] / SCALE + 0.5], [a[1] / SCALE + 0.5, b[1] / SCALE + 0.5], clip
+            )
+        self._draw_polylines(lines, color, lw, dash)
+
+    def path(self, verts, codes, color, lw=None, fill=None, alpha=1.0, clip=True):
+        if len(verts) == 0:
+            return
+        v = numpy.asarray(verts, dtype=float)
+        self._record_path(v, codes, color if lw is not None else None, lw, fill, clip)
+        p = PathPatch(
+            Path(v, codes), transform=self.trans, facecolor=fill if fill is not None else "none",
+            edgecolor=color if lw is not None else "none",
+            linewidth=(lw * LW_SCALE) if lw is not None else 0.0, alpha=alpha,
+            capstyle="butt", joinstyle="miter",
+        )
+        self._add(p, clip)
+
+    def _record_path(self, v, codes, color, lw, fill, clip):
+        # fill: exact extents; stroke: butt caps and miter joins like the PDF
+        if fill is not None and not _is_white(fill):
+            self._record(tuple(Path(v, codes).get_extents().extents), clip)
+        if color is None or lw is None or _is_white(color):
+            return
+        hw = 0.5 * lw * LW_SCALE
+        # split into subpaths
+        sub = []
+        cur = []
+        for pt, cd in zip(v, codes):
+            if cd == Path.MOVETO:
+                if cur:
+                    sub.append((cur, False))
+                cur = [tuple(pt)]
+            elif cd == Path.CLOSEPOLY:
+                sub.append((cur, True))
+                cur = []
+            elif cd == Path.LINETO:
+                cur.append(tuple(pt))
+            else:
+                # curves (circles): extents plus half the line width
+                cur = None
+                break
+        if cur is None:
+            e = Path(v, codes).get_extents().extents
+            self._record((e[0] - hw, e[1] - hw, e[2] + hw, e[3] + hw), clip)
+            return
+        if cur:
+            sub.append((cur, False))
+        for pts, isclosed in sub:
+            n = len(pts)
+            segs = [(pts[i], pts[i + 1]) for i in range(n - 1)]
+            if isclosed and n > 1:
+                segs.append((pts[-1], pts[0]))
+            self._record_segments(segs, color, lw, clip)
+            if isclosed and n > 2:
+                for i in range(n):
+                    P = pts[i]
+                    A = pts[i - 1]
+                    Bp = pts[(i + 1) % n]
+                    a = (A[0] - P[0], A[1] - P[1])
+                    b = (Bp[0] - P[0], Bp[1] - P[1])
+                    la, lb = math.hypot(*a), math.hypot(*b)
+                    if la == 0 or lb == 0:
+                        continue
+                    ua = (a[0] / la, a[1] / la)
+                    ub = (b[0] / lb, b[1] / lb)
+                    cosang = max(-1.0, min(1.0, ua[0] * ub[0] + ua[1] * ub[1]))
+                    half = 0.5 * math.acos(cosang)
+                    if half <= 0 or 1.0 / math.sin(half) > 10.0:
+                        continue
+                    bis = (ua[0] + ub[0], ua[1] + ub[1])
+                    lbis = math.hypot(*bis)
+                    if lbis == 0:
+                        continue
+                    d = hw / math.sin(half)
+                    tip = (P[0] - bis[0] / lbis * d, P[1] - bis[1] / lbis * d)
+                    box = (min(P[0], tip[0]), min(P[1], tip[1]), max(P[0], tip[0]), max(P[1], tip[1]))
+                    if clip and self.clip_pt is not None:
+                        c = self.clip_pt
+                        box = (max(box[0], c[0]), max(box[1], c[1]), min(box[2], c[2]), min(box[3], c[3]))
+                    if box[0] <= box[2] and box[1] <= box[3]:
+                        self.ink.append(box)
+
+    def _record_glyphs(self, run, fontname, size, tx, ty, angle):
+        prop = font_props(fontname, size)
+        nimbus = "nimbus" in os.path.basename(fontManager.findfont(prop)).lower()
+        a = angle * DEG2RAD
+        ca, sa = math.cos(a), math.sin(a)
+        for i, ch in enumerate(run):
+            if ch.isspace():
+                continue
+            gx = _raw_width(run[:i], prop, size) if i else 0.0
+            if angle not in (0, 90):
+                e = glyph_extents(ch, fontname, size, angle)
+                if e is None:
+                    continue
+                ox, oy = tx + gx * ca, ty + gx * sa
+                d = GS_45.get(ch, (0, 0, 0, 0)) if (nimbus and angle == -45) else (0, 0, 0, 0)
+                f = size / 12.0
+                self.ink.append((ox + e[0] + d[0] * f, oy + e[1] + d[1] * f, ox + e[2] + d[2] * f, oy + e[3] + d[3] * f))
+                continue
+            e = glyph_extents(ch, fontname, size)
+            if e is None:
+                continue
+            x0, y0, x1, y1 = e[0] + gx, e[1], e[2] + gx, e[3]
+            if nimbus and ch in GS_PAD:
+                if angle == 0:
+                    x0 -= GS_PAD[ch][0]
+                elif angle == 90:
+                    y1 += GS_PAD[ch][1]
+            pts = [(x0, y0), (x1, y0), (x0, y1), (x1, y1)]
+            xs = [tx + px * ca - py * sa for px, py in pts]
+            ys = [ty + px * sa + py * ca for px, py in pts]
+            self.ink.append((min(xs), min(ys), max(xs), max(ys)))
+
+    def text(self, xu, yu, text, hjust, angle=0.0):
+        if text is None or text == "":
+            return
+        frags, width = layout_text(text)
+        a = angle * DEG2RAD
+        ux, uy = math.cos(a), math.sin(a)
+        vx, vy = -math.sin(a), math.cos(a)
+        x0 = u2pt(xu)
+        y0 = u2pt(yu)
+        shift = {LEFT: 0.0, CENTRE: -0.5 * width, RIGHT: -width}[hjust]
+        for (fx, base, s, fontname, size) in frags:
+            dy = base - 0.5 * FONTSIZE
+            for (rx, run) in kern_runs(s, fontname, size)[0]:
+                dx = shift + fx + rx
+                tx, ty = x0 + dx * ux + dy * vx, y0 + dx * uy + dy * vy
+                self._record_glyphs(run, fontname, size, tx, ty, angle)
+                t = Text(
+                    tx, ty, run, transform=self.trans,
+                    fontproperties=font_props(fontname, size), color="black", rotation=angle,
+                    rotation_mode="anchor", horizontalalignment="left",
+                    verticalalignment="baseline", parse_math=False, usetex=False,
+                )
+                self._add(t, False)
+
+    def multiline(self, x, y, text, hor, vert, angle):
+        # port of term.c:write_multiline
+        if text is None:
+            return
+        if vert != JUST_TOP:
+            lines = text.count("\n")
+            if angle:
+                x -= (vert * lines * V_CHAR) // 2
+            else:
+                y += (vert * lines * V_CHAR) // 2
+        for line in text.split("\n"):
+            if 0 <= x <= T_XMAX - 1 and 0 <= y <= T_YMAX - 1:  # on_page()
+                self.text(x, y, line, hor, angle)
+            if angle == 90:
+                x += V_CHAR
+            elif angle == -90:
+                x -= V_CHAR
+            else:
+                y -= V_CHAR
+
+
+def _is_white(c):
+    return c is not None and tuple(c) == (1, 1, 1)
+
+
+def clip_segment(a, b, box):
+    # Liang-Barsky clipping of segment a-b to box (x0, y0, x1, y1)
+    x0, y0 = a
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    t0, t1 = 0.0, 1.0
+    for p, q in ((-dx, x0 - box[0]), (dx, box[2] - x0), (-dy, y0 - box[1]), (dy, box[3] - y0)):
+        if p == 0:
+            if q < 0:
+                return None
+        else:
+            r = q / p
+            if p < 0:
+                t0 = max(t0, r)
+            else:
+                t1 = min(t1, r)
+            if t0 > t1:
+                return None
+    return (x0 + t0 * dx, y0 + t0 * dy), (x0 + t1 * dx, y0 + t1 * dy)
+
+
+def point_path(x, y, style, size):
+    # port of gp_cairo_draw_point; x, y in points, size = pointsize * 3pt
+    # returns list of (verts, codes, filled)
+    M, L, C = Path.MOVETO, Path.LINETO, Path.CLOSEPOLY
+    out = []
+    if style < 0:
+        k = 0.5
+        circ = Path.circle((x, y), k)
+        out.append((circ.vertices, circ.codes, "dot"))  # filled, not stroked
+        return out
+    style = style % 15
+    s = size
+    if s == 0 and style in (3, 4, 5, 6, 11, 12, 13, 14):
+        return out
+    if style == 0:
+        out.append(([(x - s, y), (x + s, y), (x, y - s), (x, y + s)], [M, L, M, L], "stroke"))
+    elif style == 1:
+        out.append(([(x - s, y - s), (x + s, y + s), (x - s, y + s), (x + s, y - s)], [M, L, M, L], "stroke"))
+    elif style == 2:
+        out.append(
+            (
+                [(x - s, y), (x + s, y), (x, y - s), (x, y + s), (x - s, y - s), (x + s, y + s), (x - s, y + s), (x + s, y - s)],
+                [M, L, M, L, M, L, M, L],
+                "stroke",
+            )
+        )
+    elif style in (3, 4):
+        out.append(([(x - s, y + s), (x - s, y - s), (x + s, y - s), (x + s, y + s), (0, 0)], [M, L, L, L, C], "fill" if style == 4 else "stroke"))
+    elif style in (5, 6):
+        circ = Path.circle((x, y), s)
+        out.append((circ.vertices, circ.codes, "fill" if style == 6 else "stroke"))
+    elif style in (7, 8):
+        out.append(([(x - s, y - s + 1), (x, y + s), (x + s, y - s + 1), (0, 0)], [M, L, L, C], "fill" if style == 8 else "stroke"))
+    elif style in (9, 10):
+        out.append(([(x - s, y + s - 1), (x, y - s), (x + s, y + s - 1), (0, 0)], [M, L, L, C], "fill" if style == 10 else "stroke"))
+    elif style in (11, 12):
+        out.append(([(x - s, y), (x, y - s), (x + s, y), (x, y + s), (0, 0)], [M, L, L, L, C], "fill" if style == 12 else "stroke"))
+    elif style in (13, 14):
+        out.append(
+            (
+                [
+                    (x + s * 0.5878, y + s * 0.8090),
+                    (x - s * 0.5878, y + s * 0.8090),
+                    (x - s * 0.9511, y - s * 0.3090),
+                    (x, y - s),
+                    (x + s * 0.9511, y - s * 0.3090),
+                    (0, 0),
+                ],
+                [M, L, L, L, L, C],
+                "fill" if style == 14 else "stroke",
+            )
+        )
+    return out
+
+
+def draw_points(cv, pts, style, ps, color, lw):
+    # pts: list of (xu, yu) in terminal units
+    stroke_v, stroke_c, fill_v, fill_c, dot_v, dot_c = [], [], [], [], [], []
+    size = ps * 3.0
+    for (xu, yu) in pts:
+        for verts, codes, kind in point_path(u2pt(xu), u2pt(yu), style, size):
+            if kind == "dot":
+                dot_v.extend(verts)
+                dot_c.extend(codes)
+            elif kind == "fill":
+                fill_v.extend(verts)
+                fill_c.extend(codes)
+            else:
+                stroke_v.extend(verts)
+                stroke_c.extend(codes)
+    if dot_v:
+        cv.path(dot_v, dot_c, None, lw=None, fill=color, clip=False)
+    if fill_v:
+        cv.path(fill_v, fill_c, color, lw=lw, fill=color, clip=False)
+    if stroke_v:
+        cv.path(stroke_v, stroke_c, color, lw=lw, clip=False)
+
+
+def dash_for(lp):
+    # lt 0 (LT_AXIS) is drawn dotted by the cairo terminal
+    if lp.l_type == LT_AXIS:
+        sc = max(1.0, lp.lw)
+        return (0.2 * sc, 2.0 * sc)
+    return None
+
+
+###############################################################################
+# one gnuplot "plot" command
+###############################################################################
+class Plot:
+    def __init__(self, idx, e, st):
+        self.e = e
+        self.lp = parse_lp(idx, e.lp_spec)
+        self.title = e.title
+        self.points = []  # dicts: x, y, xlow, xhigh, ylow, yhigh, type
+        self.nodata = False
+
+
+def read_plot_data(pl, X, Y, xmap):
+    e = pl.e
+    if not X.used:
+        # reset flags to auto-scale X axis to contents of data set
+        if X.auto_min:
+            X.min = VERYLARGE
+        if X.auto_max:
+            X.max = -VERYLARGE
+    rows = read_datafile(e.source)
+    for row in rows:
+        vals = [column(row, c) for c in e.cols]
+        if any(v is None for v in vals):
+            continue
+        if e.xmap:
+            vals[0] = apply_xmap(xmap, vals[0])
+        if e.style == "yerr":
+            x, y, d = vals
+            xlow = xhigh = x
+            ylow, yhigh = y - d, y + d
+        elif e.style == "xyerr":
+            x, y, dx, dy = vals
+            xlow, xhigh, ylow, yhigh = x - dx, x + dx, y - dy, y + dy
+        elif e.style == "filled":
+            x, v2, v3 = vals
+            y = v2 - v3
+            xlow = xhigh = x
+            ylow, yhigh = y, v2 + v3
+        else:
+            x, y = vals
+            xlow = xhigh = x
+            ylow = yhigh = y
+        p = {"x": x, "y": y, "xlow": xlow, "xhigh": xhigh, "ylow": ylow, "yhigh": yhigh}
+        t = INRANGE
+        t, _ = X.store(x, t)
+        t, _ = Y.store(y, t)
+        if e.style == "yerr":
+            t, r = Y.store(ylow, t)
+            if r == UNDEFINED:
+                p["ylow"] = -VERYLARGE
+            t, r = Y.store(yhigh, t)
+            if r == UNDEFINED:
+                p["yhigh"] = -VERYLARGE
+        elif e.style in ("xyerr", "filled"):
+            dummy = INRANGE
+            for k, A in (("xlow", X), ("xhigh", X), ("ylow", Y), ("yhigh", Y)):
+                dummy, r = A.store(p[k], dummy)
+                if r == UNDEFINED:
+                    p[k] = -VERYLARGE
+        p["type"] = t
+        pl.points.append(p)
+    if len(pl.points) == 0:
+        warn("Skipping data file with no valid points")
+        pl.nodata = True
+    X.used = True
+    Y.used = True
+
+
+def eval_plot_function(pl, X, Y):
+    samples = 100
+    if X.log:
+        if not (X.min > 0 and X.max > 0):
+            raise GnuplotError("logscaled axis must have positive range")
+        t_min = X.to_primary(X.min)
+        t_max = X.to_primary(X.max)
+    else:
+        t_min, t_max = X.min, X.max
+    t_step = (t_max - t_min) / (samples - 1)
+    xs = []
+    for i in range(samples):
+        t = t_min + i * t_step
+        if X.log:
+            t = X.from_primary(t)
+        elif abs(t) < 1.0e-9 and abs(t_step) > 1.0e-6:
+            t = 0.0
+        xs.append(t)
+    for x in xs:
+        y = gp_eval(pl.e.source, x)
+        p = {"x": x, "y": y, "xlow": x, "xhigh": x, "ylow": y, "yhigh": y}
+        if math.isnan(y):
+            p["type"] = UNDEFINED
+        else:
+            # sampled functions only update the y range
+            t, _ = Y.store(y, INRANGE)
+            p["type"] = t
+        pl.points.append(p)
+    Y.used = True
+
+
+def render_page(elements, st, pp):
+    X = Axis(st.x, reset_autoscale=False)
+    Y = Axis(st.y)
+    plots = [Plot(i, e, st) for i, e in enumerate(elements)]
+
+    # first pass: data
+    some_functions = False
+    for pl in plots:
+        if pl.e.kind == "data":
+            read_plot_data(pl, X, Y, st.xmap)
+        else:
+            some_functions = True
+
+    if some_functions and (X.max == -VERYLARGE or X.min == VERYLARGE):
+        X.min, X.max = -10.0, 10.0
+    if any(pl.e.kind == "data" for pl in plots):
+        X.check_empty_range("x range is invalid")
+
+    for pl in plots:
+        if pl.e.kind == "func":
+            eval_plot_function(pl, X, Y)
+
+    if X.max == -VERYLARGE or X.min == VERYLARGE:
+        raise GnuplotError("all points undefined!")
+    if X.log:
+        X.update_primary()
+        X.extend_log()
+    X.check_log_limits()
+    X.update_primary()
+    Y.check_empty_range("all points y value undefined!")
+    if Y.log:
+        Y.update_primary()
+        Y.extend_log()
+    Y.check_log_limits()
+    Y.update_primary()
+
+    cv = Canvas()
+    B = boundary(plots, X, Y, st)
+    draw_plot(cv, plots, X, Y, st, B)
+    save_page(cv, pp)
+
+
+###############################################################################
+# port of boundary.c
+###############################################################################
+class Bounds:
+    pass
+
+
+def boundary(plots, X, Y, st):
+    key = st.key
+    B = Bounds()
+    B.key = key
+
+    xlabel = st.x.label
+    ylabel = st.y.label
+    xlablin = label_width(xlabel)[1] if xlabel else 0
+    if xlabel and re.search(r"[_^]", xlabel):
+        xlablin += 1
+    ylablin = label_width(ylabel)[1] if ylabel else 0
+    xticlin = 1
+    yticlin = 1
+    vertical_xtics = X.tic_rotate != 0
+    vertical_ytics = Y.tic_rotate != 0
+
+    ylabel_textwidth = ylablin * V_CHAR if ylabel else 0
+
+    ytop = int(0.5 + (T_YMAX - 1))
+    top_margin = V_CHAR
+    ytop -= top_margin
+    xleft = H_CHAR * 1
+    xright = (T_XMAX - 1) - H_CHAR * 2
+
+    xtic_textheight = int(V_CHAR * (xticlin + 1))
+    xtic_height = 0
+    if xlablin:
+        xlabel_textheight = int((xlablin + 0.2) * V_CHAR)
+    else:
+        xlabel_textheight = 0
+    ybot = 0
+    ybot += xtic_height + xtic_textheight
+    if xlabel_textheight > 0:
+        ybot += xlabel_textheight
+    if ybot == 0:
+        ybot += int(H_CHAR * 2)
+
+    B.xleft, B.xright, B.ybot, B.ytop = xleft, xright, ybot, ytop
+    B.key_xleft = 0
+    if key.visible:
+        B.max_ptitl_len, B.ptitl_cnt = find_maxl_keys(plots)
+        do_key_layout(B, key)
+    xleft, xright, ybot, ytop = B.xleft, B.xright, B.ybot, B.ytop
+
+    if Y.log:
+        Y.extend_log()
+    setup_tics(Y)
+    # gnuplot 6.0.2: logscale axes with fewer than 3 tics get linear tic intervals
+    for ax in (X, Y):
+        if ax.log:
+            ax.force_linear = False
+            count = [0]
+
+            def cnt(a, place, text, level):
+                if level == 0 and inrange(place, a.min, a.max):
+                    count[0] += 1
+
+            gen_tics(ax, cnt)
+            if count[0] < 3:
+                ax.force_linear = True
+                setup_tics(ax)
+
+    if vertical_ytics:
+        ytic_textwidth = int(V_CHAR * (yticlin + 2))
+    else:
+        widest = [0]
+
+        def cb(ax, place, text, level):
+            if level != 1:
+                widest[0] = max(widest[0], label_width(text)[0])
+
+        gen_tics(Y, cb)
+        ytic_textwidth = int(H_CHAR * (widest[0] + 2))
+    ytic_width = 0
+
+    space_to_left = B.key_xleft
+    if space_to_left < ylabel_textwidth:
+        space_to_left = ylabel_textwidth
+    xleft = 0 + space_to_left
+    xleft += ytic_width + ytic_textwidth
+    if xleft - ytic_width - ytic_textwidth < 0:
+        xleft = ytic_width + ytic_textwidth
+    if xleft < H_CHAR * 2:
+        xleft = H_CHAR * 2
+    xleft = int(xleft + 0.5 * H_CHAR)
+
+    xtic_textwidth = 0
+    if X.user_tics is not None:
+        maxrightlabel = xright
+        X.set_scale(xleft, xright)
+        for pos, label in X.user_tics:
+            if label:
+                length = int(estimate_strlen(label)[0] * math.cos(DEG2RAD * X.tic_rotate) * H_CHAR)
+                if inrange(pos, X.set_min, X.set_max):
+                    xx = X.map(pos)
+                    if not math.isfinite(xx):
+                        continue
+                    xx = cint(xx + 0.5)
+                    xx += length if X.tic_rotate else length // 2
+                    if maxrightlabel < xx:
+                        maxrightlabel = xx
+        xtic_textwidth = int(maxrightlabel - xright)
+        if xtic_textwidth > T_XMAX // 4:
+            xtic_textwidth = T_XMAX // 4
+            warn("difficulty making room for xtic labels")
+
+    # rmargin auto
+    if xright > (T_XMAX - 1) - (H_CHAR * 2):
+        xright = (T_XMAX - 1) - (H_CHAR * 2)
+    if T_XMAX - xright < xtic_textwidth:
+        xright = T_XMAX - xtic_textwidth
+    xright = int(xright - 1.0 * H_CHAR)
+
+    setup_tics(X)
+
+    if vertical_xtics:
+        projection = -math.sin(X.tic_rotate * DEG2RAD)
+        widest = [0]
+
+        def cbx(ax, place, text, level):
+            if level != 1:
+                widest[0] = max(widest[0], label_width(text)[0])
+
+        B.xleft, B.xright = xleft, xright
+        gen_tics(X, cbx)
+        ybot -= xtic_textheight
+        if projection > 0.0:
+            xtic_textheight = int(int(H_CHAR * widest[0]) * projection + V_CHAR)
+        ybot += xtic_textheight
+
+    if ytop < ybot:
+        ytop, ybot = ybot, ytop
+
+    B.xlabel_y = int(ybot - xtic_height - xtic_textheight - xlabel_textheight + (xlablin + 0.2) * V_CHAR)
+    B.ylabel_x = xleft - ytic_width - ytic_textwidth
+    B.ylabel_x -= ylabel_textwidth // 2
+    B.xtic_y = ybot - xtic_height - (H_CHAR if vertical_xtics else V_CHAR)
+    B.ytic_x = xleft - ytic_width - ((ytic_textwidth - V_CHAR) if vertical_ytics else H_CHAR)
+
+    B.xleft, B.xright, B.ybot, B.ytop = xleft, xright, ybot, ytop
+    X.set_scale(xleft, xright)
+    Y.set_scale(ybot, ytop)
+    if key.visible:
+        do_key_bounds(B, key, X, Y)
+    return B
+
+
+def find_maxl_keys(plots):
+    mlen = cnt = 0
+    for pl in plots:
+        if pl.title:
+            ln = estimate_strlen(pl.title)[0]
+            if ln != 0:
+                cnt += 1
+                mlen = max(mlen, ln)
+    return mlen, cnt
+
+
+def do_key_layout(B, key):
+    B.key_sample_width = int(key.swidth * H_CHAR + H_TIC) if key.swidth >= 0 else 0
+    B.key_sample_height = int(max(1.25 * V_TIC, V_CHAR))
+    B.key_entry_height = int(B.key_sample_height * key.vert_factor)
+    if B.key_entry_height == 0:
+        B.key_entry_height = 1
+    B.key_title_height = 0
+    B.key_title_extra = 0
+    B.key_title_ypos = 0
+    if key.title:
+        est_lines = label_width(key.title)[1]
+        est_height = estimate_strlen(key.title)[1]
+        B.key_title_height = int(est_height * V_CHAR)
+        B.key_title_ypos = B.key_title_height // 2
+        B.key_title_ypos -= (est_lines - 1) * V_CHAR // 2
+    L = B.max_ptitl_len
+    if key.reverse:
+        B.key_sample_left = -B.key_sample_width
+        B.key_sample_right = 0
+        B.key_text_left = H_CHAR
+        B.key_text_right = int(H_CHAR * (L + 1 + key.width_fix))
+        B.key_size_left = H_CHAR - B.key_sample_left
+        B.key_size_right = B.key_text_right
+    else:
+        B.key_sample_left = 0
+        B.key_sample_right = B.key_sample_width
+        B.key_text_left = -int(H_CHAR * (L + 1 + key.width_fix))
+        B.key_text_right = -int(H_CHAR)
+        B.key_size_left = -B.key_text_left
+        B.key_size_right = B.key_sample_right + H_CHAR
+    B.key_point_offset = (B.key_sample_left + B.key_sample_right) // 2
+    B.key_col_wth = B.key_size_left + B.key_size_right
+    cnt = B.ptitl_cnt
+    if key.user_cols > 0:
+        B.key_cols = key.user_cols
+        B.key_rows = int(math.ceil(cnt / float(B.key_cols)))
+    else:
+        B.key_rows = cnt
+        B.key_cols = 1
+        if not key.stack_vertical:
+            B.key_cols = int((B.xright - B.xleft) / B.key_col_wth) if B.key_col_wth else 1
+            if key.maxcols > 0 and B.key_cols > key.maxcols:
+                B.key_cols = key.maxcols
+            if B.key_cols == 0:
+                B.key_cols = 1
+                B.key_col_wth = B.xright - B.xleft
+                warn("Warning - difficulty fitting plot titles into key")
+            B.key_rows = (cnt + B.key_cols - 1) // B.key_cols
+            B.key_cols = 1 if B.key_rows == 0 else (cnt + B.key_rows - 1) // B.key_rows
+            if B.key_cols == 0:
+                B.key_cols = 1
+        else:
+            i = int(
+                (B.ytop - B.ybot - key.height_fix * B.key_entry_height - B.key_title_height - B.key_title_extra)
+                / B.key_entry_height
+            )
+            if key.maxrows > 0 and i > key.maxrows:
+                i = key.maxrows
+            if i == 0:
+                i = 1
+                warn("Warning - difficulty fitting plot titles into key")
+            if cnt > i:
+                B.key_cols = (cnt + i - 1) // i
+                if B.key_cols == 0:
+                    B.key_cols = 1
+                B.key_rows = (cnt + B.key_cols - 1) // B.key_cols
+    if key.title:
+        ytlen = label_width(key.title)[0] - int(key.swidth) + 2
+        ytlen *= H_CHAR
+        if ytlen > B.key_cols * B.key_col_wth:
+            B.key_col_wth = ytlen // B.key_cols
+    outside = (key.region == "exterior" and (key.vpos != JUST_CENTRE or key.hpos != CENTRE)) or key.region == "margin"
+    if outside:
+        more = 0
+        if key.margin == "b":
+            more = int(B.key_rows * B.key_entry_height + B.key_title_height + B.key_title_extra + key.height_fix * B.key_entry_height)
+            if B.ybot + more > B.ytop:
+                warn("Warning - difficulty fitting plot titles into key")
+            else:
+                B.ybot += more
+        elif key.margin == "t":
+            more = int(B.key_rows * B.key_entry_height + B.key_title_height + B.key_title_extra + key.height_fix * B.key_entry_height)
+            if B.ytop - more < B.ybot:
+                warn("Warning - difficulty fitting plot titles into key")
+            else:
+                B.ytop -= more
+        elif key.margin == "l":
+            more = B.key_col_wth * B.key_cols
+            if B.xleft + more > B.xright:
+                warn("Warning - difficulty fitting plot titles into key")
+            else:
+                B.key_xleft = more
+            B.xleft += B.key_xleft
+        elif key.margin == "r":
+            more = B.key_col_wth * B.key_cols
+            if B.xright - more < B.xleft:
+                warn("Warning - difficulty fitting plot titles into key")
+            else:
+                B.xright -= more
+
+
+def map_position(system, v, X, Y, B, axis):
+    if system == "first":
+        return (X if axis == "x" else Y).map(v)
+    if system == "graph":
+        return (B.xleft + v * (B.xright - B.xleft)) if axis == "x" else (B.ybot + v * (B.ytop - B.ybot))
+    if system == "screen":
+        return v * (T_XMAX - 1) if axis == "x" else v * (T_YMAX - 1)
+    if system == "character":
+        return v * H_CHAR if axis == "x" else v * V_CHAR
+    raise GnuplotError("second axis coordinates are not supported")
+
+
+def do_key_bounds(B, key, X, Y):
+    B.key_height = int(B.key_title_height + B.key_title_extra + B.key_rows * B.key_entry_height + key.height_fix * B.key_entry_height)
+    B.key_width = B.key_col_wth * B.key_cols
+    kb = {}
+    if key.region == "interior" or (key.region == "exterior" and key.vpos == JUST_CENTRE and key.hpos == CENTRE):
+        if key.vpos == JUST_TOP:
+            kb["ytop"] = B.ytop - V_TIC
+            kb["ybot"] = kb["ytop"] - B.key_height
+        elif key.vpos == JUST_BOT:
+            kb["ybot"] = B.ybot + V_TIC
+            kb["ytop"] = kb["ybot"] + B.key_height
+        else:
+            kb["ybot"] = ((B.ybot + B.ytop) - B.key_height) // 2
+            kb["ytop"] = ((B.ybot + B.ytop) + B.key_height) // 2
+        if key.hpos == LEFT:
+            kb["xleft"] = B.xleft + H_CHAR
+            kb["xright"] = kb["xleft"] + B.key_width
+        elif key.hpos == RIGHT:
+            kb["xright"] = B.xright - H_CHAR
+            kb["xleft"] = kb["xright"] - B.key_width
+        else:
+            kb["xleft"] = ((B.xright + B.xleft) - B.key_width) // 2
+            kb["xright"] = ((B.xright + B.xleft) + B.key_width) // 2
+    elif key.region in ("exterior", "margin"):
+        if key.margin == "t":
+            kb["ytop"] = T_YMAX - V_TIC
+            kb["ybot"] = kb["ytop"] - B.key_height
+        elif key.margin == "b":
+            kb["ybot"] = V_TIC
+            kb["ytop"] = kb["ybot"] + B.key_height
+        else:
+            if key.vpos == JUST_TOP:
+                kb["ytop"] = B.ytop
+                kb["ybot"] = kb["ytop"] - B.key_height
+            elif key.vpos == JUST_CENTRE:
+                kb["ybot"] = ((B.ybot + B.ytop) - B.key_height) // 2
+                kb["ytop"] = ((B.ybot + B.ytop) + B.key_height) // 2
+            else:
+                kb["ybot"] = B.ybot
+                kb["ytop"] = kb["ybot"] + B.key_height
+        if key.margin == "l":
+            kb["xleft"] = H_CHAR
+            kb["xright"] = kb["xleft"] + B.key_width
+        elif key.margin == "r":
+            kb["xright"] = (T_XMAX - 1) - H_CHAR
+            kb["xleft"] = kb["xright"] - B.key_width
+        else:
+            if key.hpos == LEFT:
+                kb["xleft"] = B.xleft
+                kb["xright"] = kb["xleft"] + B.key_width
+            elif key.hpos == CENTRE:
+                kb["xleft"] = ((B.xright + B.xleft) - B.key_width) // 2
+                kb["xright"] = ((B.xright + B.xleft) + B.key_width) // 2
+            else:
+                kb["xright"] = B.xright
+                kb["xleft"] = kb["xright"] - B.key_width
+    else:
+        (sx, vx), (sy, vy) = key.user_pos
+        x = int(map_position(sx, vx, X, Y, B, "x"))
+        y = int(map_position(sy, vy, X, Y, B, "y"))
+        kb["xleft"] = x
+        if key.hpos == CENTRE:
+            kb["xleft"] -= B.key_width // 2
+        elif key.hpos == RIGHT:
+            kb["xleft"] -= B.key_width
+        kb["xright"] = kb["xleft"] + B.key_width
+        kb["ytop"] = y
+        if key.vpos == JUST_CENTRE:
+            kb["ytop"] += B.key_height // 2
+        elif key.vpos == JUST_BOT:
+            kb["ytop"] += B.key_height
+        kb["ybot"] = kb["ytop"] - B.key_height
+    B.kb = kb
+
+
+###############################################################################
+# port of graphics.c:do_plot
+###############################################################################
+BLACK = (0, 0, 0)
+WHITE = (1, 1, 1)
+
+
+def draw_tics(cv, X, Y, B):
+    cv.set_clip(None)
+    # y axis
+    rot = Y.tic_rotate
+    ytic_x = B.ytic_x
+    if rot:
+        # axis_output_tics: "purely empirical shift" for rotated ytic labels
+        ytic_x = int(ytic_x + H_CHAR * 2.5)
+
+    def ycb(ax, place, text, level):
+        y = Y.map(place)
+        size = V_TIC * (0.5 if level == 1 else 1.0)
+        cv.segments([[(B.xleft, y), (B.xleft + size, y)], [(B.xright, y), (B.xright - size, y)]], BLACK, 1.0, clip=False)
+        if text:
+            cv.multiline(ytic_x, y, text, RIGHT, JUST_CENTRE, rot)
+
+    gen_tics(Y, ycb)
+    rot = X.tic_rotate
+
+    def xcb(ax, place, text, level):
+        x = X.map(place)
+        if x < B.xleft or x > B.xright:
+            return
+        size = V_TIC * (0.5 if level == 1 else 1.0)
+        cv.segments([[(x, B.ybot), (x, B.ybot + size)], [(x, B.ytop), (x, B.ytop - size)]], BLACK, 1.0, clip=False)
+        if text:
+            if rot:
+                cv.multiline(x, B.xtic_y, text, LEFT, JUST_CENTRE, rot)
+            else:
+                cv.multiline(x, B.xtic_y, text, CENTRE, JUST_TOP, 0)
+
+    gen_tics(X, xcb)
+
+
+def draw_border(cv, B):
+    xl, yb, xr, yt = [u2pt(v) for v in (B.xleft, B.ybot, B.xright, B.ytop)]
+    M, L, C = Path.MOVETO, Path.LINETO, Path.CLOSEPOLY
+    cv.path([(xl, yb), (xl, yt), (xr, yt), (xr, yb), (0, 0)], [M, L, L, L, C], BLACK, lw=1.0, clip=False)
+
+
+def plot_bars(cv, pl, X, Y, B):
+    lp = pl.lp
+    if lp.l_type == LT_NODRAW:
+        return
+    segs = []
+    style = pl.e.style
+    ymin = min(Y.min, Y.max)
+    xmin = min(X.min, X.max)
+    for p in pl.points:
+        if p["type"] == UNDEFINED:
+            continue
+        if not inrange(p["x"], X.min, X.max):
+            continue
+        xM = X.map(p["x"])
+        if not inrange(p["y"], Y.min, Y.max):
+            continue
+        # a y errorbar that went negative on a log axis ends at the axis minimum
+        ylowM = Y.map(ymin) if p["ylow"] == -VERYLARGE else Y.map(p["ylow"])
+        yhighM = -1e9 if p["yhigh"] == -VERYLARGE else Y.map(p["yhigh"])
+        segs.append([(xM, ylowM), (xM, yhighM)])
+        segs.append([(int(xM - ERRORBARTIC), ylowM), (int(xM + ERRORBARTIC), ylowM)])
+        segs.append([(int(xM - ERRORBARTIC), yhighM), (int(xM + ERRORBARTIC), yhighM)])
+    if style == "xyerr":
+        for p in pl.points:
+            if p["type"] == UNDEFINED:
+                continue
+            if not inrange(p["y"], Y.min, Y.max):
+                continue
+            yM = Y.map(p["y"])
+            xlowM = X.map(xmin) if p["xlow"] == -VERYLARGE else X.map(p["xlow"])
+            xhighM = -1e9 if p["xhigh"] == -VERYLARGE else X.map(p["xhigh"])
+            segs.append([(xlowM, yM), (xhighM, yM)])
+            segs.append([(xlowM, int(yM - ERRORBARTIC)), (xlowM, int(yM + ERRORBARTIC))])
+            segs.append([(xhighM, int(yM - ERRORBARTIC)), (xhighM, int(yM + ERRORBARTIC))])
+    segs = [s for s in segs if all(math.isfinite(c) for pt in s for c in pt)]
+    cv.set_clip((B.xleft, B.ybot, B.xright, B.ytop))
+    cv.segments(segs, lp.color, lp.lw, dash_for(lp))
+
+
+def plot_points(cv, pl, X, Y, B):
+    lp = pl.lp
+    if lp.l_type == LT_NODRAW:
+        return
+    pts = []
+    for p in pl.points:
+        if p["type"] != INRANGE:
+            continue
+        x = X.map(p["x"])
+        y = Y.map(p["y"])
+        if not (math.isfinite(x) and math.isfinite(y)):
+            continue
+        pts.append((x, y))
+    if pl.e.style in ("yerr", "xyerr") and lp.p_type != -1 and POINTINTERVALBOX != 0:
+        draw_points(cv, pts, 6, 1.0 * POINTINTERVALBOX, WHITE, lp.lw)
+    if lp.p_type >= -1:
+        draw_points(cv, pts, lp.p_type, lp.ps, lp.color, lp.lw)
+
+
+def plot_lines(cv, pl, X, Y, B):
+    lp = pl.lp
+    if lp.l_type == LT_NODRAW:
+        return
+    xs, ys = [], []
+    for p in pl.points:
+        if p["type"] == UNDEFINED:
+            xs.append(float("nan"))
+            ys.append(float("nan"))
+            continue
+        xs.append(X.map(p["x"]))
+        ys.append(Y.map(p["y"]))
+    cv.set_clip((B.xleft, B.ybot, B.xright, B.ytop))
+    cv.lines(xs, ys, lp.color, lp.lw, dash_for(lp))
+
+
+def plot_filledcurves(cv, pl, X, Y, B):
+    lp = pl.lp
+    if lp.l_type == LT_NODRAW:
+        return
+    M, L, C = Path.MOVETO, Path.LINETO, Path.CLOSEPOLY
+    verts, codes = [], []
+    seg = []
+
+    def finish(seg):
+        if len(seg) < 2:
+            return
+        def m(A, v):
+            # log(0) = -inf: the vertex lies far outside the plot
+            return -1e9 if (A.log and v == 0) else A.map(v)
+
+        upper = [(m(X, p["x"]), m(Y, p["ylow"])) for p in seg]
+        lower = [(m(X, p["x"]), m(Y, p["yhigh"])) for p in reversed(seg)]
+        poly = [(u2pt(a), u2pt(b)) for a, b in upper + lower]
+        if not all(math.isfinite(c) for pt in poly for c in pt):
+            return
+        verts.extend(poly + [(0, 0)])
+        codes.extend([M] + [L] * (len(poly) - 1) + [C])
+
+    for p in pl.points:
+        if p["type"] == UNDEFINED or p["ylow"] == -VERYLARGE or p["yhigh"] == -VERYLARGE:
+            finish(seg)
+            seg = []
+            continue
+        seg.append(p)
+    finish(seg)
+    cv.set_clip((B.xleft, B.ybot, B.xright, B.ytop))
+    cv.path(verts, codes, None, lw=None, fill=lp.color, alpha=0.4)
+
+
+def draw_key_box(cv, B, key, key_pass=False):
+    kb = B.kb
+    if key.front and key_pass:
+        cv.path(
+            [(u2pt(kb["xleft"]), u2pt(kb["ybot"])), (u2pt(kb["xleft"]), u2pt(kb["ytop"])),
+             (u2pt(kb["xright"]), u2pt(kb["ytop"])), (u2pt(kb["xright"]), u2pt(kb["ybot"])), (0, 0)],
+            [Path.MOVETO, Path.LINETO, Path.LINETO, Path.LINETO, Path.CLOSEPOLY], None, lw=None, fill=WHITE, clip=False,
+        )
+    if key.title and (key_pass or not key.front):
+        anchor = (kb["xleft"] + kb["xright"]) // 2
+        cv.multiline(anchor, kb["ytop"] - B.key_title_ypos, key.title, CENTRE, JUST_TOP, 0)
+    if key.box:
+        cv.set_clip(CANVAS)
+        segs = [
+            [(kb["xleft"], kb["ybot"]), (kb["xleft"], kb["ytop"])],
+            [(kb["xleft"], kb["ytop"]), (kb["xright"], kb["ytop"])],
+            [(kb["xright"], kb["ytop"]), (kb["xright"], kb["ybot"])],
+            [(kb["xright"], kb["ybot"]), (kb["xleft"], kb["ybot"])],
+        ]
+        if key.title:
+            yy = kb["ytop"] - (B.key_title_height + B.key_title_extra)
+            segs.append([(kb["xleft"], yy), (kb["xright"], yy)])
+        cv.segments(segs, BLACK, key.box_lw)
+    B.yl_ref = kb["ytop"] - (B.key_title_height + B.key_title_extra)
+    B.yl_ref -= int((key.height_fix + 1) * B.key_entry_height) // 2
+    B.xl = kb["xleft"] + B.key_size_left
+    B.yl = B.yl_ref
+    B.key_count = 0
+
+
+def advance_key(B, key, only_invert):
+    if key.invert:
+        B.yl = B.kb["ybot"] + B.yl_ref + B.key_entry_height // 2 - B.yl
+    if only_invert:
+        return
+    if B.key_count >= B.key_rows:
+        B.yl = B.yl_ref
+        B.xl += B.key_col_wth
+        B.key_count = 0
+    else:
+        B.yl = B.yl - B.key_entry_height
+
+
+def do_key_sample(cv, pl, B, key):
+    xl, yl = B.xl, B.yl
+    cv.set_clip(CANVAS)
+    if key.just == LEFT:
+        cv.multiline(xl + B.key_text_left, yl, pl.title, LEFT, JUST_CENTRE, 0)
+    else:
+        cv.multiline(xl + B.key_text_right, yl, pl.title, RIGHT, JUST_CENTRE, 0)
+    lp = pl.lp
+    style = pl.e.style
+    if style == "filled":
+        w = B.key_sample_right - B.key_sample_left
+        if w > 0:
+            x = xl + B.key_sample_left
+            y = yl - B.key_sample_height // 4
+            h = B.key_sample_height // 2
+            cv.path(
+                [(u2pt(x), u2pt(y)), (u2pt(x), u2pt(y + h)), (u2pt(x + w), u2pt(y + h)), (u2pt(x + w), u2pt(y)), (0, 0)],
+                [Path.MOVETO, Path.LINETO, Path.LINETO, Path.LINETO, Path.CLOSEPOLY],
+                None, lw=None, fill=lp.color, alpha=0.4, clip=False,
+            )
+    elif lp.l_type == LT_NODRAW:
+        pass
+    elif style in ("yerr", "xyerr", "lines"):
+        cv.segments([[(xl + B.key_sample_left, yl), (xl + B.key_sample_right, yl)]], lp.color, lp.lw, dash_for(lp))
+    if style in ("yerr", "xyerr") and pl.e.kind == "data" and lp.l_type != LT_NODRAW:
+        cv.segments(
+            [
+                [(xl + B.key_sample_left, yl + ERRORBARTIC), (xl + B.key_sample_left, yl - ERRORBARTIC)],
+                [(xl + B.key_sample_right, yl + ERRORBARTIC), (xl + B.key_sample_right, yl - ERRORBARTIC)],
+            ],
+            lp.color, lp.lw,
+        )
+
+
+def do_key_sample_point(cv, pl, B, key):
+    lp = pl.lp
+    if lp.l_type == LT_NODRAW:
+        return
+    pos = [(B.xl + B.key_point_offset, B.yl)]
+    if pl.e.style in ("yerr", "xyerr") and lp.p_type != -1 and POINTINTERVALBOX != 0:
+        draw_points(cv, pos, 6, 1.0 * POINTINTERVALBOX, WHITE, lp.lw)
+    draw_points(cv, pos, lp.p_type, lp.ps, lp.color, lp.lw)
+
+
+def draw_plot(cv, plots, X, Y, st, B):
+    key = st.key
+    draw_tics(cv, X, Y, B)
+    draw_border(cv, B)
+    if key.visible:
+        draw_key_box(cv, B, key)
+
+    def curves(key_pass):
+        for pl in plots:
+            localkey = key.visible
+            if pl.title is not None and pl.title == "":
+                localkey = False
+            elif pl.nodata:
+                localkey = False
+            elif key_pass or not key.front:
+                if localkey and pl.title:
+                    B.key_count += 1
+                    advance_key(B, key, True)
+                    do_key_sample(cv, pl, B, key)
+            if not pl.nodata and not key_pass:
+                s = pl.e.style
+                if s in ("yerr", "xyerr"):
+                    plot_bars(cv, pl, X, Y, B)
+                    plot_points(cv, pl, X, Y, B)
+                elif s == "points":
+                    plot_points(cv, pl, X, Y, B)
+                elif s == "lines":
+                    plot_lines(cv, pl, X, Y, B)
+                elif s == "filled":
+                    plot_filledcurves(cv, pl, X, Y, B)
+            if key.front and not key_pass:
+                pass
+            elif localkey and pl.title:
+                if pl.e.style in ("yerr", "xyerr", "points"):
+                    do_key_sample_point(cv, pl, B, key)
+                advance_key(B, key, False)
+
+    curves(False)
+    if key.visible and key.front:
+        draw_key_box(cv, B, key, True)
+        curves(True)
+
+    draw_border(cv, B)
+    # draw_titles
+    if st.y.label:
+        x = B.ylabel_x
+        y = (B.ytop + B.ybot) // 2
+        x = int(x + H_CHAR / 4.0)
+        cv.multiline(x, y, st.y.label, CENTRE, JUST_TOP, 90)
+    if st.x.label:
+        x = (B.xright + B.xleft) // 2
+        y = B.xlabel_y - V_CHAR // 2
+        cv.multiline(x, y, st.x.label, CENTRE, JUST_TOP, 0)
+    # front arrows
+    for xa in st.arrows:
+        if X.log and not xa > 0:
+            raise GnuplotError("arrow has x coord of %g; must be above 0 for log scale!" % xa)
+        x = X.map(xa)
+        # arrows are clipped to the canvas only
+        cv.set_clip(CANVAS)
+        cv.segments([[(x, B.ybot), (x, B.ytop)]], BLACK, 1.0)
+
+
+###############################################################################
+# output: crop to ink (pdfcrop) and store description (exiftool)
+###############################################################################
+def ink_bbox(cv):
+    # like pdfcrop: the integer bounding box of everything drawn in non-white
+    if not cv.ink:
+        return None
+    e = numpy.array(cv.ink)
+    # nothing outside the canvas survives; ghostscript's page covers whole
+    # device pixels at 4000 dpi, i.e. slightly more than 340 x 255 points
+    wmax = math.ceil(PAGE_W / GS_PIXEL) * GS_PIXEL
+    hmax = math.ceil(PAGE_H / GS_PIXEL) * GS_PIXEL
+    x0 = math.floor(max(0.0, e[:, 0].min()))
+    y0 = math.floor(max(0.0, e[:, 1].min()))
+    x1 = math.ceil(min(wmax, e[:, 2].max()))
+    y1 = math.ceil(min(hmax, e[:, 3].max()))
+    return Bbox.from_extents(x0 / 72.0, y0 / 72.0, x1 / 72.0, y1 / 72.0)
+
+
+pages_written = [0]
+
+
+def save_page(cv, pp):
+    bb = ink_bbox(cv)
+    if bb is None:
+        bb = Bbox.from_extents(0, 0, PAGE_W / 72.0, PAGE_H / 72.0)
+    pp.savefig(cv.fig, bbox_inches=bb, pad_inches=0)
+    pages_written[0] += 1
+
+
+def xml_escape(s):
+    return (
+        s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+    )
+
+
+def add_xmp_description(fname, description):
+    # incremental PDF update adding an XMP packet with dc:description
+    data = open(fname, "rb").read()
+    m = re.search(rb"startxref\s+(\d+)\s+%%EOF\s*$", data)
+    t = data.rfind(b"trailer")
+    if not m or t < 0:
+        raise ValueError("unexpected PDF structure")
+    trailer = data[t:]
+    root = re.search(rb"/Root\s+(\d+)\s+(\d+)\s+R", trailer)
+    size = re.search(rb"/Size\s+(\d+)", trailer)
+    info = re.search(rb"/Info\s+(\d+)\s+(\d+)\s+R", trailer)
+    rootnum = int(root.group(1))
+    catalog = re.search(rb"(?<!\d)" + root.group(1) + rb"\s+0\s+obj\s*<<(.*?)>>\s*endobj", data, re.S)
+    if not catalog:
+        raise ValueError("catalog not found")
+    cat = re.sub(rb"/Metadata\s+\d+\s+\d+\s+R", b"", catalog.group(1))
+    n = int(size.group(1))
+    xmp = (
+        '<?xpacket begin="\ufeff" id="W5M0MpCehiHzreSzNTczkc9d"?>\n'
+        '<x:xmpmeta xmlns:x="adobe:ns:meta/">\n'
+        '<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">\n'
+        ' <rdf:Description rdf:about=""\n  xmlns:dc="http://purl.org/dc/elements/1.1/">\n'
+        "  <dc:description>\n   <rdf:Alt>\n    <rdf:li xml:lang=\"x-default\">%s</rdf:li>\n"
+        "   </rdf:Alt>\n  </dc:description>\n </rdf:Description>\n</rdf:RDF>\n</x:xmpmeta>\n"
+        '<?xpacket end="w"?>' % xml_escape(description)
+    ).encode("utf-8")
+    out = bytearray(data)
+    if not out.endswith(b"\n"):
+        out += b"\n"
+    off_meta = len(out)
+    out += b"%d 0 obj\n<< /Type /Metadata /Subtype /XML /Length %d >>\nstream\n" % (n, len(xmp))
+    out += xmp + b"\nendstream\nendobj\n"
+    off_cat = len(out)
+    out += b"%d 0 obj\n<<" % rootnum + cat + b" /Metadata %d 0 R >>\nendobj\n" % n
+    off_xref = len(out)
+    out += b"xref\n%d 1\n%010d 00000 n \n%d 1\n%010d 00000 n \n" % (rootnum, off_cat, n, off_meta)
+    out += b"trailer\n<< /Size %d /Root %d 0 R" % (n + 1, rootnum)
+    if info:
+        out += b" /Info " + info.group(1) + b" " + info.group(2) + b" R"
+    out += b" /Prev %s >>\nstartxref\n%d\n%%%%EOF\n" % (m.group(1), off_xref)
+    open(fname, "wb").write(bytes(out))
+
+
+###############################################################################
+# Process commands (same dispatch as jks_plot)
+###############################################################################
+events = []  # ('set', callable) | ('plot', [Elem, ...]) | ('newpage',)
+
+
+def plot(elems):
+    events.append(("plot", elems))
+
+
+def setting(fn):
+    events.append(("set", fn))
+
+
+def title_or_none(a, i):
+    if len(a) > i and a[i] != "":
+        return mktitle(a[i])
+    return None
+
+
+for c in icmds:
+    if c[0] == "c":
+        a = c[1:].split(":")
+        if has(a[1]):
+            files.append(create_file(a[1]))
+            f = files[-1]
+            t = title_or_none(a, 2)
+            e1 = Elem("data", "yerr", f, [1, 2, 4], "lt %s lw 0.5 ps 0" % a[0], None)
+            e2 = Elem("data", "yerr", f, [1, 2, 3], "lt %s" % a[0], t)
+            e1.xmap = e2.xmap = True
+            plot([e1, e2])
+    elif c[0] == "e":
+        a = c[1:].split(":")
+        if has(a[1]):
+            files.append(create_file(a[1]))
+            f = files[-1]
+            t = title_or_none(a, 2)
+            e1 = Elem("data", "points", f, [1, 4], "lt %s lw 0.5 ps 0" % a[0], None)
+            e2 = Elem("data", "points", f, [1, 3], "lt %s" % a[0], t)
+            e1.xmap = e2.xmap = True
+            plot([e1, e2])
+    elif c[0] in "psPQ":
+        a = c[1:].split(":")
+        if has(a[1]) and has(a[2]):
+            if c[0] == "s":
+                files.append(create_file_p(a[1], a[2], eval(a[3])))
+                t = title_or_none(a, 4)
+            else:
+                files.append(create_file_p(a[1], a[2]))
+                t = title_or_none(a, 3)
+            f = files[-1]
+            lw = {"p": "", "s": "", "P": " lw 2", "Q": " lw 4"}[c[0]]
+            e1 = Elem("data", "xyerr", f, [1, 2, 5, 6], "lt %s lw 0.5 ps 0" % a[0], None)
+            e2 = Elem("data", "xyerr", f, [1, 2, 3, 4], "lt %s%s" % (a[0], lw), t)
+            e1.xmap = e2.xmap = True
+            plot([e1, e2])
+    elif c[0] == "d":
+        a = c[1:].split(":")
+        files.append(create_file_d(a[1], a[2], a[3]))
+        e = Elem("data", "yerr", files[-1], [1, 2, 3], "lt %s lw 1" % a[0], a[4])
+        e.xmap = True
+        plot([e])
+    elif c[0] == "b":
+        a = c[1:].split(":")
+        files.append(create_file(a[1]))
+        f = files[-1]
+        e1 = Elem("data", "yerr", f, [1, 2, 4], "lt %s lw 1 ps 0" % a[0], None)
+        e2 = Elem("data", "yerr", f, [1, 2, 3], "lt %s lw 2" % a[0], None)
+        e1.xmap = e2.xmap = False
+        plot([e1, e2])
+    elif c[0] == "f":
+        a = c[1:].split(":")
+        files.append(create_fnc_file(a[1], a[2], float(a[3]), float(a[4])))
+        f = files[-1]
+        t = None if len(a) < 6 else mktitle(a[5])
+        e1 = Elem("data", "filled", f, [1, 2, 3], "lw 1.5 lt %s" % a[0], t)
+        e2 = Elem("data", "lines", f, [1, 2], "lt %s" % a[0], None)
+        e1.xmap = e2.xmap = False
+        plot([e1, e2])
+    elif c[0:2] == "ls":
+        a = c.split(":")
+        if len(a) == 1:
+
+            def fn(st):
+                st.x.log = st.y.log = False
+
+        else:
+            fn = lambda st, s=a[1]: set_logscale(st, s)
+        setting(fn)
+    elif c[0] in "lL":
+        a = c[1:].split(":")
+        lw = " lw 2" if c[0] == "L" else ""
+        if len(a) == 3:
+            e = Elem("func", "lines", a[1], None, "lt %s%s" % (a[0], lw), a[2])
+        elif len(a) == 2:
+            e = Elem("func", "lines", a[1], None, "lt %s%s" % (a[0], lw), None)
+        else:
+            assert 0
+        e.xmap = False
+        plot([e])
+    elif c[0:5] == "xwrap":
+        a = c.split(":")
+        T = int(a[1])
+        T2 = int(a[2])
+        setting(lambda st, T=T, T2=T2: setattr(st, "xmap", (T, T2)))
+    elif c[0:1] == "k":
+        a = c.split(":")
+        setting(lambda st, s=a[1]: set_key(st.key, s))
+    elif c[0:2] == "xr":
+        a = c.split(":")
+        setting(lambda st, lo=a[1], hi=a[2]: set_range(st.x, lo, hi))
+    elif c[0:2] == "xl":
+        a = c.split(":")
+        if len(a) == 1:
+            setting(lambda st: setattr(st.x, "label", None))
+        else:
+            setting(lambda st, s=mktitle(a[1]): setattr(st.x, "label", s))
+    elif c[0:2] in ("xt", "yt"):
+        a = c.split(":")
+        n = len(a) - 1
+        if c[0:2] == "xt" and n == 0:
+
+            def fn(st):
+                st.x.tic_rotate = 0
+                st.x.tics_user = None
+
+        else:
+            tics = [(float(l), parse_esc(a[l + 1])) for l in range(n)]
+
+            def fn(st, ax=c[0], tics=tics):
+                axis = getattr(st, ax)
+                axis.tic_rotate = -45
+                axis.tics_user = tics if len(tics) > 0 else None
+
+        setting(fn)
+    elif c[0:2] == "yl":
+        a = c.split(":")
+        if len(a) == 1:
+            setting(lambda st: setattr(st.y, "label", None))
+        else:
+            setting(lambda st, s=mktitle(a[1]): setattr(st.y, "label", s))
+    elif c[0:2] == "vl":
+        a = c.split(":")
+        setting(lambda st, s=a[1]: st.arrows.append(gp_eval_scalar(s)))
+    elif c[0:2] == "yr":
+        a = c.split(":")
+        setting(lambda st, lo=a[1], hi=a[2]: set_range(st.y, lo, hi))
+    elif c == "newpage":
+        events.append(("newpage",))
+    else:
+        print("Unknown command %s" % c)
+
+###############################################################################
+# Render
+###############################################################################
+st = State()
+page = []
+failed = False
+pp = PdfPages(fpdf_name)
+try:
+    for ev in events + [("newpage",)]:
+        if ev[0] == "set":
+            ev[1](st)
+        elif ev[0] == "plot":
+            page.extend(ev[1])
+        else:
+            if len(page) > 0:
+                st.x.runtime_auto_min = st.x.auto_min
+                st.y.runtime_auto_min = st.y.auto_min
+                render_page(page, st, pp)
+            page = []
+except GnuplotError as err:
+    warn(str(err))
+    failed = True
+finally:
+    pp.close()
+
+if pages_written[0] > 0:
+    try:
+        with open(fpdf_name, "rb") as src, open(fout, "wb") as dst:
+            dst.write(src.read())
+        add_xmp_description(fout, open(desc_name).read())
+    except Exception as err:
+        warn("could not store description: %s" % err)
+else:
+    warn("no plot was generated")
+    if os.path.exists(fpdf_name):
+        os.unlink(fpdf_name)
+
+if len(messages) > 0:
+    print("Error: %s" % "\n".join(messages))
+
+if keep == False:
+    for fn in [desc_name, fpdf_name] + files:
+        if os.path.exists(fn):
+            os.unlink(fn)
+    os.rmdir(targetDir)

@@ -108,7 +108,7 @@ if "JKS_CORRELATION_STRENGTH" in os.environ:
     c_in_cv = lam * c_in_cv + (1 - lam) * np.diag(c_in_cv.diagonal())
 evs, _ = np.linalg.eig(c_in_cv)
 evs = sorted(evs.real)
-kappa = evs[-1] / evs[0]
+kappa = abs(evs[-1] / evs[0])
 print(f"Covariance condition number: {kappa:e}")
 assert kappa < 1e10, f"Problematic condition number of covariance {kappa}"
 
