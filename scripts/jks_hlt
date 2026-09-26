@@ -18,8 +18,8 @@
 #    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 #
 import jks, sys, os, mpmath, numpy as np
-if len(sys.argv) not in (8, 9):
-    print("%s database.jks tag_in list_of_weights_in list_of_weights_out omega_grid tag_out lambda [alpha]" % sys.argv[0])
+if len(sys.argv) not in (8, 9, 10):
+    print("%s database.jks tag_in list_of_weights_in list_of_weights_out omega_grid tag_out lambda [alpha [p]]" % sys.argv[0])
     print("")
     print("Linear (Hansen-Lupo-Tantalo, arXiv:1903.06476) estimate of the output weights.")
     print("Same calling convention and storage as jks_plsa; no positivity is used.")
@@ -31,7 +31,7 @@ if len(sys.argv) not in (8, 9):
     print("- each output weight k is approximated by  kbar(omega) = sum_i g_i w_in_i(omega),")
     print("  g minimizing")
     print("    W[g] = (1 - lambda) A[g]/A[0] + lambda B[g]/C_0^2")
-    print("    A[g] = int_grid d omega exp(alpha omega) (k(omega) - kbar(omega))^2")
+    print("    A[g] = int_grid d omega exp(alpha omega) omega^(2p) (k(omega) - kbar(omega))^2")
     print("    B[g] = g^T Cov g")
     print("  (integral by the trapezoidal rule on omega_grid, C_0 the mean of the first")
     print("  input weight).  The output is g.C, its jackknife blocks g.C^(b).")
@@ -40,13 +40,17 @@ if len(sys.argv) not in (8, 9):
     print("  Only the statistical error is stored; the lambda dependence (and the")
     print("  omega_grid dependence) is left to be estimated by running at several values.")
     print("- alpha (default 0): exponential weight of the kernel norm A.")
+    print("- p (default 0): power weight of the kernel norm A.  This is the same as")
+    print("  scaling all input AND output weights by omega^p (the data and the")
+    print("  estimated quantity are unchanged, only the norm of k - kbar is).")
     print("")
     print("- Note that an error on omega_grid is not propagated, use multiple omega_grid if needed")
     sys.exit(0)
 
 db, tag_in, list_w_in, list_w_out, omega_grid, tag_out = sys.argv[1:7]
 lam = float(sys.argv[7])
-alpha = float(sys.argv[8]) if len(sys.argv) == 9 else 0.0
+alpha = float(sys.argv[8]) if len(sys.argv) >= 9 else 0.0
+pw = float(sys.argv[9]) if len(sys.argv) == 10 else 0.0
 assert 0.0 < lam < 1.0, "lambda must be in (0, 1)"
 
 res = jks.resamples(db)
@@ -54,9 +58,13 @@ res = jks.resamples(db)
 omega_grid_arr = np.asarray(res.get(omega_grid).mean(), float)
 K = len(omega_grid_arr)
 assert K >= 2 and np.all(np.diff(omega_grid_arr) > 0), "omega_grid must be strictly increasing"
+if pw < 0.0:
+    assert omega_grid_arr[0] > 0.0, "p < 0 needs omega > 0 on the whole grid"
+elif pw > 0.0:
+    assert omega_grid_arr[0] >= 0.0, "p != 0 needs omega >= 0 on the whole grid"
 
 print(f"HLT linear estimate on energy grid [{min(omega_grid_arr)},..,{max(omega_grid_arr)}] "
-      f"({K} resolution), lambda = {lam:g}, alpha = {alpha:g}")
+      f"({K} resolution), lambda = {lam:g}, alpha = {alpha:g}, p = {pw:g}")
 
 # Unlike jks_plsa, no column rescaling: the kernel norm A[g] is a statement about
 # the functions on the grid in physical units.  exp(-t omega) underflowing to 0
@@ -104,11 +112,12 @@ print(f"Covariance condition number: {kappa:e}")
 assert kappa < 1e10, f"Problematic condition number of covariance {kappa}"
 assert c_mn[0] != 0.0, "the first input weight has zero mean; B[g] normalization C_0 undefined"
 
-# trapezoidal quadrature weights times exp(alpha omega)
+# trapezoidal quadrature weights times exp(alpha omega) omega^(2p); the power is
+# identical to scaling every input and output weight by omega^p
 dw = np.zeros(K)
 dw[1:] += 0.5 * np.diff(omega_grid_arr)
 dw[:-1] += 0.5 * np.diff(omega_grid_arr)
-qw = dw * np.exp(alpha * omega_grid_arr)
+qw = dw * np.exp(alpha * omega_grid_arr) * (omega_grid_arr ** (2 * pw) if pw != 0.0 else 1.0)
 sq = np.sqrt(qw)
 Sig = 0.5 * (c_in_cv + c_in_cv.T)
 Lt = np.linalg.cholesky(Sig).T                  # B[g] = |Lt g|^2
