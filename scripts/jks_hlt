@@ -1,0 +1,306 @@
+#!/usr/bin/env python3
+#
+#    JKS - Measurement database system
+#    Copyright (C) 2013-2026  Christoph Lehner (christoph.lehner@ur.de, https://github.com/lehner/jks)
+#
+#    This program is free software; you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation; either version 2 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License along
+#    with this program; if not, write to the Free Software Foundation, Inc.,
+#    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+#
+import jks, sys, os, mpmath, numpy as np
+if len(sys.argv) not in (8, 9):
+    print("%s database.jks tag_in list_of_weights_in list_of_weights_out omega_grid tag_out lambda [alpha]" % sys.argv[0])
+    print("")
+    print("Linear (Hansen-Lupo-Tantalo, arXiv:1903.06476) estimate of the output weights.")
+    print("Same calling convention and storage as jks_plsa; no positivity is used.")
+    print("")
+    print("- list_of_weights_X accepts a list of")
+    print("  a) in integer t for which exp(-t*omega) will be used as the spectral weight")
+    print("  b) a string tag to a weight")
+    print("")
+    print("- each output weight k is approximated by  kbar(omega) = sum_i g_i w_in_i(omega),")
+    print("  g minimizing")
+    print("    W[g] = (1 - lambda) A[g]/A[0] + lambda B[g]/C_0^2")
+    print("    A[g] = int_grid d omega exp(alpha omega) (k(omega) - kbar(omega))^2")
+    print("    B[g] = g^T Cov g")
+    print("  (integral by the trapezoidal rule on omega_grid, C_0 the mean of the first")
+    print("  input weight).  The output is g.C, its jackknife blocks g.C^(b).")
+    print("")
+    print("- lambda in (0, 1): small lambda = faithful kernel, large statistical error.")
+    print("  The shift of the estimate under lambda -> lambda/10 is stored as the")
+    print("  '!lambda' variation (the HLT stability systematic).")
+    print("- alpha (default 0): exponential weight of the kernel norm A.")
+    print("")
+    print("- Note that an error on omega_grid is not propagated, use multiple omega_grid if needed")
+    sys.exit(0)
+
+db, tag_in, list_w_in, list_w_out, omega_grid, tag_out = sys.argv[1:7]
+lam = float(sys.argv[7])
+alpha = float(sys.argv[8]) if len(sys.argv) == 9 else 0.0
+assert 0.0 < lam < 1.0, "lambda must be in (0, 1)"
+
+res = jks.resamples(db)
+
+omega_grid_arr = np.asarray(res.get(omega_grid).mean(), float)
+K = len(omega_grid_arr)
+assert K >= 2 and np.all(np.diff(omega_grid_arr) > 0), "omega_grid must be strictly increasing"
+
+print(f"HLT linear estimate on energy grid [{min(omega_grid_arr)},..,{max(omega_grid_arr)}] "
+      f"({K} resolution), lambda = {lam:g}, alpha = {alpha:g}")
+
+# Unlike jks_plsa, no column rescaling: the kernel norm A[g] is a statement about
+# the functions on the grid in physical units.  exp(-t omega) underflowing to 0
+# is harmless here.
+w_in, w_out = eval(list_w_in), eval(list_w_out)
+assert isinstance(w_in, list) and isinstance(w_out, list)
+
+def get_weight(e):
+    assert isinstance(e, str), "weight not found"
+    ww = np.asarray(res.get(e).mean(), float)
+    assert ww.shape == omega_grid_arr.shape, f"{e} not found"
+    return ww
+
+def process_weight_element(e, i):
+    if isinstance(e, int):
+        return np.exp(-e * omega_grid_arr), e
+    return get_weight(e), i
+
+def process_weight(w):
+    t = [process_weight_element(e, i) for i, e in enumerate(w)]
+    return [x[0] for x in t], [x[1] for x in t]
+
+list_w_in, sel_w_in = process_weight(w_in)
+list_w_out, sel_w_out = process_weight(w_out)
+
+list_w_in = np.asarray(list_w_in, float)      # (m, K)
+list_w_out = np.asarray(list_w_out, float)    # (p, K)
+
+def get_c_in(r):
+    raw_in = r[tag_in]
+    return [ raw_in[s] for s in sel_w_in ]
+
+c_in = res.apply(get_c_in)
+c_mn = np.asarray(c_in.mean(), float)
+c_in_cv = np.array(c_in.cov())
+
+if "JKS_CORRELATION_STRENGTH" in os.environ:
+    lcs = float(os.environ["JKS_CORRELATION_STRENGTH"])
+    assert lcs <= 1.0 and 0.0 <= lcs, "JKS_CORRELATION_STRENGTH needs to be between 0 and 1"
+    c_in_cv = lcs * c_in_cv + (1 - lcs) * np.diag(c_in_cv.diagonal())
+evs, _ = np.linalg.eig(c_in_cv)
+evs = sorted(evs.real)
+kappa = abs(evs[-1] / evs[0])
+print(f"Covariance condition number: {kappa:e}")
+assert kappa < 1e10, f"Problematic condition number of covariance {kappa}"
+assert c_mn[0] != 0.0, "the first input weight has zero mean; B[g] normalization C_0 undefined"
+
+# trapezoidal quadrature weights times exp(alpha omega)
+dw = np.zeros(K)
+dw[1:] += 0.5 * np.diff(omega_grid_arr)
+dw[:-1] += 0.5 * np.diff(omega_grid_arr)
+qw = dw * np.exp(alpha * omega_grid_arr)
+sq = np.sqrt(qw)
+Sig = 0.5 * (c_in_cv + c_in_cv.T)
+Lt = np.linalg.cholesky(Sig).T                  # B[g] = |Lt g|^2
+m, p = len(c_mn), len(list_w_out)
+C0 = float(c_mn[0])
+
+# --- precision ----------------------------------------------------------------
+# g solves the normal equations  N g = r,
+#     N = (1-lam)/A0 Gram + lam/C0^2 Sigma,   Gram_il = sum_j qw_j e_i(w_j) e_l(w_j).
+# With D = diag(N)^-1/2 the scaled matrix DND has unit diagonal, so its largest
+# eigenvalue is <= m, and its smallest is >= lam/C0^2 min_i(Sigma_ii/N_ii) lmin(corr)
+# (corr = the correlation matrix of Sigma).  Every ingredient is a sum of positive
+# terms or an eigenvalue of a matrix with condition < 1e10, so the bound
+#     kappa <= m C0^2 / (lam min_i(Sigma_ii/N_ii) lmin(corr))
+# is reliable in double precision even when kappa itself is 1e40.  For
+# kappa <= 1e6 the double-precision stacked least-squares solve is used (error
+# <~ eps kappa < 1e-10); beyond that the normal equations are solved in mpmath
+# with ceil(log10 kappa) + 20 digits, and every such solve is repeated with 20
+# more digits: the two must agree to 1e-10 of the statistical error, else the
+# precision is raised (and the script fails if that does not converge).
+# The data C and the weights on the grid are taken as exact (integer-time weights
+# exp(-t omega) are re-evaluated at the working precision), and g.C is also formed
+# in mpmath: the HLT coefficients alternate in sign and are large, so g.C can
+# cancel by many orders of magnitude.
+gram_diag = (list_w_in ** 2) @ qw
+A0_d = (list_w_out ** 2) @ qw
+sd = np.sqrt(np.diag(Sig))
+lmin_corr = float(np.linalg.eigvalsh(Sig / np.outer(sd, sd)).min())
+assert lmin_corr > 0.0, "input covariance is not positive definite"
+
+def kappa_bound(j, lm):
+    Nd = (1 - lm) / A0_d[j] * gram_diag + lm / C0 ** 2 * np.diag(Sig)
+    return m * C0 ** 2 / (lm * np.min(np.diag(Sig) / Nd) * lmin_corr)
+
+def hlt_double(k, lm, A0):
+    """stacked, column-equilibrated least squares (no normal equations)"""
+    M = np.vstack([np.sqrt((1 - lm) / A0) * (sq[:, None] * list_w_in.T),
+                   np.sqrt(lm) / abs(C0) * Lt])
+    rhs = np.concatenate([np.sqrt((1 - lm) / A0) * sq * k, np.zeros(m)])
+    sc = np.linalg.norm(M, axis=0)
+    sc[sc == 0.0] = 1.0
+    return np.linalg.lstsq(M / sc, rhs, rcond=None)[0] / sc
+
+_mp_cache = {}
+def mp_rows(ws, arrs, dps):
+    """weights on the grid at dps digits; integer times re-evaluated exactly"""
+    with mpmath.workdps(dps):
+        om = [mpmath.mpf(float(x)) for x in omega_grid_arr]
+        return [[mpmath.exp(-e * o) for o in om] if isinstance(e, int)
+                else [mpmath.mpf(float(x)) for x in a] for e, a in zip(ws, arrs)]
+
+def mp_setup(dps):
+    if dps not in _mp_cache:
+        with mpmath.workdps(dps):
+            E = mp_rows(w_in, list_w_in, dps)
+            q = [mpmath.mpf(float(x)) for x in qw]
+            Gram = [[mpmath.fsum(qj * a * b for qj, a, b in zip(q, E[i], E[l]))
+                     for l in range(m)] for i in range(m)]
+            S = [[mpmath.mpf(float(Sig[i, l])) for l in range(m)] for i in range(m)]
+            C = [mpmath.mpf(float(x)) for x in c_mn]
+        _mp_cache[dps] = (E, q, Gram, S, C)
+    return _mp_cache[dps]
+
+def hlt_mp(j, lm, dps):
+    """g (as mpf list) minimizing W at lam=lm, solved at dps digits"""
+    E, q, Gram, S, C = mp_setup(dps)
+    with mpmath.workdps(dps):
+        k = mp_rows([w_out[j]], [list_w_out[j]], dps)[0]
+        A0 = mpmath.fsum(qj * x * x for qj, x in zip(q, k))
+        a = (1 - mpmath.mpf(lm)) / A0
+        b = mpmath.mpf(lm) / C[0] ** 2
+        N = mpmath.matrix(m, m); r = mpmath.matrix(m, 1)
+        for i in range(m):
+            r[i] = a * mpmath.fsum(qj * x * y for qj, x, y in zip(q, E[i], k))
+            for l in range(m):
+                N[i, l] = a * Gram[i][l] + b * S[i][l]
+        d = [1 / mpmath.sqrt(N[i, i]) for i in range(m)]
+        for i in range(m):
+            r[i] *= d[i]
+            for l in range(m):
+                N[i, l] *= d[i] * d[l]
+        y = mpmath.lu_solve(N, r)
+        return [d[i] * y[i] for i in range(m)]
+
+def mp_dot(g, c, dps):
+    with mpmath.workdps(dps):
+        return mpmath.fsum(gi * mpmath.mpf(float(ci)) for gi, ci in zip(g, c))
+
+def solve_output(j):
+    """returns (g, g10, dps or None, A_rel, B_rel), g as float array (dps None) or
+    mpf list, g10 the coefficients at lam/10"""
+    if A0_d[j] == 0.0:
+        return np.zeros(m), np.zeros(m), None, 0.0, 0.0
+    kap = kappa_bound(j, lam / 10.0)
+    if kap <= 1e6:
+        k = list_w_out[j]
+        g = hlt_double(k, lam, A0_d[j]); g10 = hlt_double(k, lam / 10.0, A0_d[j])
+        return g, g10, None, float(qw @ (k - list_w_in.T @ g) ** 2) / A0_d[j], \
+            float(g @ Sig @ g) / C0 ** 2
+    dps = int(np.ceil(np.log10(kap))) + 20
+    for attempt in range(4):
+        sol = [(hlt_mp(j, lm, dd), dd) for dd in (dps, dps + 20) for lm in (lam, lam / 10.0)]
+        ok = True
+        for (g1, d1), (g2, d2) in ((sol[0], sol[2]), (sol[1], sol[3])):
+            g2f = np.array([float(x) for x in g2])
+            st = float(np.sqrt(max(g2f @ Sig @ g2f, 0.0)))
+            dv = abs(float(mp_dot(g1, c_mn, d2) - mp_dot(g2, c_mn, d2)))
+            if not dv <= 1e-10 * st:
+                ok = False
+        if ok:
+            break
+        dps += 20
+    else:
+        print(f"ERROR: output weight {sel_w_out[j]!r}: the HLT solve did not converge "
+              f"in precision up to {dps} digits (kappa bound {kap:.1e}).")
+        print("  Refusing to store non-converged values in the database.")
+        sys.exit(1)
+    g, g10 = sol[2][0], sol[3][0]
+    dd = dps + 20
+    E, q, _, _, _ = mp_setup(dd)
+    with mpmath.workdps(dd):
+        k = mp_rows([w_out[j]], [list_w_out[j]], dd)[0]
+        A0 = mpmath.fsum(qj * x * x for qj, x in zip(q, k))
+        res_ = [k[jj] - mpmath.fsum(g[i] * E[i][jj] for i in range(m)) for jj in range(K)]
+        A_rel = float(mpmath.fsum(qj * x * x for qj, x in zip(q, res_)) / A0)
+        B_rel = float(mpmath.fsum(g[i] * mpmath.mpf(float(Sig[i, l])) * g[l]
+                                  for i in range(m) for l in range(m)) / C0 ** 2)
+    return g, g10, dd, A_rel, B_rel
+
+sols = [solve_output(j) for j in range(p)]
+A_rel = np.array([s_[3] for s_ in sols]); B_rel = np.array([s_[4] for s_ in sols])
+digits = [s_[2] for s_ in sols]
+
+def estimate(c, which):
+    """g.c for every output (which = 0: lambda, 1: lambda/10)"""
+    out = np.empty(p)
+    for j, s_ in enumerate(sols):
+        g = s_[which]
+        out[j] = float(mp_dot(g, c, s_[2])) if s_[2] is not None else float(g @ np.asarray(c, float))
+    return out
+
+central = estimate(c_mn, 0)
+sys_ = np.abs(estimate(c_mn, 1) - central)      # HLT stability under lambda -> lambda/10
+
+# stat blocks: the estimate is linear in the data, so the jackknife blocks are g.C^(b)
+jk = res.apply(lambda r: estimate(get_c_in(r), 0))
+stat = np.sqrt(np.clip(np.array(jk.cov()).diagonal(), 0.0, None))
+total = np.sqrt(stat ** 2 + sys_ ** 2)
+
+nmp = sum(d is not None for d in digits)
+if nmp:
+    print(f"mpmath used for {nmp} of {p} output weights "
+          f"({min(d for d in digits if d is not None)}..{max(d for d in digits if d is not None)} digits, "
+          f"each verified against a solve with 20 fewer digits)")
+else:
+    print("double precision sufficient for all output weights")
+print("")
+print(" out    central       stat        sys         total      sys/stat    A/A0        B/C0^2    digits")
+for j in range(p):
+    s = f" {sel_w_out[j]!s:>6}  {central[j]: .5e}  {stat[j]: .3e}  {sys_[j]: .3e}  {total[j]: .3e}  "
+    s += f"{sys_[j] / stat[j]:8.2f}" if stat[j] > 0 else "       -"
+    s += f"  {A_rel[j]: .3e}  {B_rel[j]: .3e}"
+    s += f"  {digits[j]:6d}" if digits[j] is not None else "     dbl"
+    if stat[j] > 0 and sys_[j] > stat[j]:
+        s += "  [lambda-unstable]"
+    print(s)
+print("")
+print(" central = g.C with g the HLT coefficients at lambda; stat = jackknife error of")
+print(" g.C (exactly the linearly propagated error, the estimate is linear in C);")
+print(" sys = |g(lambda/10).C - g(lambda).C| is stored as the '!lambda' variation so")
+print(" that tcov() reproduces total = stat (+) sys.")
+print(" A/A0 is the relative L2 mismatch of the reconstructed kernel: the estimate")
+print(" is of int rho kbar, not of int rho k.  Nothing bounds int rho (k - kbar)")
+print(" here -- compare with jks_plsa, whose band contains that mismatch rigorously.")
+print(" digits: mpmath working precision of the solve (dbl: double precision,")
+print(" used where the condition bound is <= 1e6).")
+print(" [lambda-unstable] (sys > stat): the estimate has not reached the stability")
+print(" plateau; lower lambda.")
+nun = int(np.sum((stat > 0) & (sys_ > stat)))
+if nun:
+    print("")
+    print(f"WARNING: {nun} of {p} output weights are lambda-unstable (sys > stat).")
+print("")
+
+desc = ("HLT (arXiv:1903.06476) linear estimate, lambda=%g, alpha=%g, "
+        "W = (1-lambda) A/A0 + lambda B/C_0^2 with trapezoidal A on omega grid tag "
+        "'%s' [%g..%g] x %d nodes, full input covariance.  stat blocks = g.C per "
+        "resample.  shift = |g(lambda/10).C - g(lambda).C|.  Input weights: %s"
+        % (lam, alpha, omega_grid, min(omega_grid_arr), max(omega_grid_arr), K, sel_w_in))
+jk = jk.addvar("lambda", central + sys_, desc)
+res.add(tag_out, jk)
+
+res.save(db)
+
+print("Done")
