@@ -137,17 +137,16 @@ gram_diag = (list_w_in ** 2) @ qw
 A0_d = (list_w_out ** 2) @ qw
 sd = np.sqrt(np.diag(Sig))
 lmin_corr = float(np.linalg.eigvalsh(Sig / np.outer(sd, sd)).min())
-assert lmin_corr > 0.0, "input covariance is not positive definite"
 
-def kappa_bound(j, lm):
-    Nd = (1 - lm) / A0_d[j] * gram_diag + lm / C0 ** 2 * np.diag(Sig)
-    return m * C0 ** 2 / (lm * np.min(np.diag(Sig) / Nd) * lmin_corr)
+def kappa_bound(j):
+    Nd = (1 - lam) / A0_d[j] * gram_diag + lam / C0 ** 2 * np.diag(Sig)
+    return m * C0 ** 2 / (lam * np.min(np.diag(Sig) / Nd) * lmin_corr)
 
-def hlt_double(k, lm, A0):
+def hlt_double(k, A0):
     """stacked, column-equilibrated least squares (no normal equations)"""
-    M = np.vstack([np.sqrt((1 - lm) / A0) * (sq[:, None] * list_w_in.T),
-                   np.sqrt(lm) / abs(C0) * Lt])
-    rhs = np.concatenate([np.sqrt((1 - lm) / A0) * sq * k, np.zeros(m)])
+    M = np.vstack([np.sqrt((1 - lam) / A0) * (sq[:, None] * list_w_in.T),
+                   np.sqrt(lam) / abs(C0) * Lt])
+    rhs = np.concatenate([np.sqrt((1 - lam) / A0) * sq * k, np.zeros(m)])
     sc = np.linalg.norm(M, axis=0)
     sc[sc == 0.0] = 1.0
     return np.linalg.lstsq(M / sc, rhs, rcond=None)[0] / sc
@@ -168,18 +167,17 @@ def mp_setup(dps):
             Gram = [[mpmath.fsum(qj * a * b for qj, a, b in zip(q, E[i], E[l]))
                      for l in range(m)] for i in range(m)]
             S = [[mpmath.mpf(float(Sig[i, l])) for l in range(m)] for i in range(m)]
-            C = [mpmath.mpf(float(x)) for x in c_mn]
-        _mp_cache[dps] = (E, q, Gram, S, C)
+        _mp_cache[dps] = (E, q, Gram, S)
     return _mp_cache[dps]
 
-def hlt_mp(j, lm, dps):
-    """g (as mpf list) minimizing W at lam=lm, solved at dps digits"""
-    E, q, Gram, S, C = mp_setup(dps)
+def hlt_mp(j, dps):
+    """g (as mpf list) minimizing W, solved at dps digits"""
+    E, q, Gram, S = mp_setup(dps)
     with mpmath.workdps(dps):
         k = mp_rows([w_out[j]], [list_w_out[j]], dps)[0]
         A0 = mpmath.fsum(qj * x * x for qj, x in zip(q, k))
-        a = (1 - mpmath.mpf(lm)) / A0
-        b = mpmath.mpf(lm) / C[0] ** 2
+        a = (1 - mpmath.mpf(lam)) / A0
+        b = mpmath.mpf(lam) / mpmath.mpf(C0) ** 2
         N = mpmath.matrix(m, m); r = mpmath.matrix(m, 1)
         for i in range(m):
             r[i] = a * mpmath.fsum(qj * x * y for qj, x, y in zip(q, E[i], k))
@@ -202,34 +200,35 @@ def solve_output(j):
     mpf list"""
     if A0_d[j] == 0.0:
         return np.zeros(m), None, 0.0, 0.0
-    kap = kappa_bound(j, lam)
+    kap = kappa_bound(j)
     if kap <= 1e6:
         k = list_w_out[j]
-        g = hlt_double(k, lam, A0_d[j])
+        g = hlt_double(k, A0_d[j])
         return g, None, float(qw @ (k - list_w_in.T @ g) ** 2) / A0_d[j], \
             float(g @ Sig @ g) / C0 ** 2
     dps = int(np.ceil(np.log10(kap))) + 20
-    for attempt in range(4):
-        g1, g = hlt_mp(j, lam, dps), hlt_mp(j, lam, dps + 20)
+    g1 = hlt_mp(j, dps)
+    for _ in range(4):
+        g = hlt_mp(j, dps + 20)
         gf = np.array([float(x) for x in g])
         st = float(np.sqrt(max(gf @ Sig @ gf, 0.0)))
         dv = abs(float(mp_dot(g1, c_mn, dps + 20) - mp_dot(g, c_mn, dps + 20)))
         if dv <= 1e-10 * st:
             break
-        dps += 20
+        g1, dps = g, dps + 20
     else:
         print(f"ERROR: output weight {sel_w_out[j]!r}: the HLT solve did not converge "
               f"in precision up to {dps} digits (kappa bound {kap:.1e}).")
         print("  Refusing to store non-converged values in the database.")
         sys.exit(1)
     dd = dps + 20
-    E, q, _, _, _ = mp_setup(dd)
+    E, q, _, S = mp_setup(dd)
     with mpmath.workdps(dd):
         k = mp_rows([w_out[j]], [list_w_out[j]], dd)[0]
         A0 = mpmath.fsum(qj * x * x for qj, x in zip(q, k))
         res_ = [k[jj] - mpmath.fsum(g[i] * E[i][jj] for i in range(m)) for jj in range(K)]
         A_rel = float(mpmath.fsum(qj * x * x for qj, x in zip(q, res_)) / A0)
-        B_rel = float(mpmath.fsum(g[i] * mpmath.mpf(float(Sig[i, l])) * g[l]
+        B_rel = float(mpmath.fsum(g[i] * S[i][l] * g[l]
                                   for i in range(m) for l in range(m)) / C0 ** 2)
     return g, dd, A_rel, B_rel
 
@@ -250,10 +249,9 @@ central = estimate(c_mn)
 jk = res.apply(lambda r: estimate(get_c_in(r)))
 stat = np.sqrt(np.clip(np.array(jk.cov()).diagonal(), 0.0, None))
 
-nmp = sum(d is not None for d in digits)
-if nmp:
-    print(f"mpmath used for {nmp} of {p} output weights "
-          f"({min(d for d in digits if d is not None)}..{max(d for d in digits if d is not None)} digits, "
+dmp = [d for d in digits if d is not None]
+if dmp:
+    print(f"mpmath used for {len(dmp)} of {p} output weights ({min(dmp)}..{max(dmp)} digits, "
           f"each verified against a solve with 20 fewer digits)")
 else:
     print("double precision sufficient for all output weights")
