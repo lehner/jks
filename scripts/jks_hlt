@@ -37,8 +37,8 @@ if len(sys.argv) not in (8, 9):
     print("  input weight).  The output is g.C, its jackknife blocks g.C^(b).")
     print("")
     print("- lambda in (0, 1): small lambda = faithful kernel, large statistical error.")
-    print("  The shift of the estimate under lambda -> lambda/10 is stored as the")
-    print("  '!lambda' variation (the HLT stability systematic).")
+    print("  Only the statistical error is stored; the lambda dependence (and the")
+    print("  omega_grid dependence) is left to be estimated by running at several values.")
     print("- alpha (default 0): exponential weight of the kernel norm A.")
     print("")
     print("- Note that an error on omega_grid is not propagated, use multiple omega_grid if needed")
@@ -198,27 +198,23 @@ def mp_dot(g, c, dps):
         return mpmath.fsum(gi * mpmath.mpf(float(ci)) for gi, ci in zip(g, c))
 
 def solve_output(j):
-    """returns (g, g10, dps or None, A_rel, B_rel), g as float array (dps None) or
-    mpf list, g10 the coefficients at lam/10"""
+    """returns (g, dps or None, A_rel, B_rel), g as float array (dps None) or
+    mpf list"""
     if A0_d[j] == 0.0:
-        return np.zeros(m), np.zeros(m), None, 0.0, 0.0
-    kap = kappa_bound(j, lam / 10.0)
+        return np.zeros(m), None, 0.0, 0.0
+    kap = kappa_bound(j, lam)
     if kap <= 1e6:
         k = list_w_out[j]
-        g = hlt_double(k, lam, A0_d[j]); g10 = hlt_double(k, lam / 10.0, A0_d[j])
-        return g, g10, None, float(qw @ (k - list_w_in.T @ g) ** 2) / A0_d[j], \
+        g = hlt_double(k, lam, A0_d[j])
+        return g, None, float(qw @ (k - list_w_in.T @ g) ** 2) / A0_d[j], \
             float(g @ Sig @ g) / C0 ** 2
     dps = int(np.ceil(np.log10(kap))) + 20
     for attempt in range(4):
-        sol = [(hlt_mp(j, lm, dd), dd) for dd in (dps, dps + 20) for lm in (lam, lam / 10.0)]
-        ok = True
-        for (g1, d1), (g2, d2) in ((sol[0], sol[2]), (sol[1], sol[3])):
-            g2f = np.array([float(x) for x in g2])
-            st = float(np.sqrt(max(g2f @ Sig @ g2f, 0.0)))
-            dv = abs(float(mp_dot(g1, c_mn, d2) - mp_dot(g2, c_mn, d2)))
-            if not dv <= 1e-10 * st:
-                ok = False
-        if ok:
+        g1, g = hlt_mp(j, lam, dps), hlt_mp(j, lam, dps + 20)
+        gf = np.array([float(x) for x in g])
+        st = float(np.sqrt(max(gf @ Sig @ gf, 0.0)))
+        dv = abs(float(mp_dot(g1, c_mn, dps + 20) - mp_dot(g, c_mn, dps + 20)))
+        if dv <= 1e-10 * st:
             break
         dps += 20
     else:
@@ -226,7 +222,6 @@ def solve_output(j):
               f"in precision up to {dps} digits (kappa bound {kap:.1e}).")
         print("  Refusing to store non-converged values in the database.")
         sys.exit(1)
-    g, g10 = sol[2][0], sol[3][0]
     dd = dps + 20
     E, q, _, _, _ = mp_setup(dd)
     with mpmath.workdps(dd):
@@ -236,27 +231,24 @@ def solve_output(j):
         A_rel = float(mpmath.fsum(qj * x * x for qj, x in zip(q, res_)) / A0)
         B_rel = float(mpmath.fsum(g[i] * mpmath.mpf(float(Sig[i, l])) * g[l]
                                   for i in range(m) for l in range(m)) / C0 ** 2)
-    return g, g10, dd, A_rel, B_rel
+    return g, dd, A_rel, B_rel
 
 sols = [solve_output(j) for j in range(p)]
-A_rel = np.array([s_[3] for s_ in sols]); B_rel = np.array([s_[4] for s_ in sols])
-digits = [s_[2] for s_ in sols]
+A_rel = np.array([s_[2] for s_ in sols]); B_rel = np.array([s_[3] for s_ in sols])
+digits = [s_[1] for s_ in sols]
 
-def estimate(c, which):
-    """g.c for every output (which = 0: lambda, 1: lambda/10)"""
+def estimate(c):
+    """g.c for every output"""
     out = np.empty(p)
-    for j, s_ in enumerate(sols):
-        g = s_[which]
-        out[j] = float(mp_dot(g, c, s_[2])) if s_[2] is not None else float(g @ np.asarray(c, float))
+    for j, (g, dd, _, _) in enumerate(sols):
+        out[j] = float(mp_dot(g, c, dd)) if dd is not None else float(g @ np.asarray(c, float))
     return out
 
-central = estimate(c_mn, 0)
-sys_ = np.abs(estimate(c_mn, 1) - central)      # HLT stability under lambda -> lambda/10
+central = estimate(c_mn)
 
 # stat blocks: the estimate is linear in the data, so the jackknife blocks are g.C^(b)
-jk = res.apply(lambda r: estimate(get_c_in(r), 0))
+jk = res.apply(lambda r: estimate(get_c_in(r)))
 stat = np.sqrt(np.clip(np.array(jk.cov()).diagonal(), 0.0, None))
-total = np.sqrt(stat ** 2 + sys_ ** 2)
 
 nmp = sum(d is not None for d in digits)
 if nmp:
@@ -266,39 +258,23 @@ if nmp:
 else:
     print("double precision sufficient for all output weights")
 print("")
-print(" out    central       stat        sys         total      sys/stat    A/A0        B/C0^2    digits")
+print(" out    central       stat        A/A0        B/C0^2    digits")
 for j in range(p):
-    s = f" {sel_w_out[j]!s:>6}  {central[j]: .5e}  {stat[j]: .3e}  {sys_[j]: .3e}  {total[j]: .3e}  "
-    s += f"{sys_[j] / stat[j]:8.2f}" if stat[j] > 0 else "       -"
+    s = f" {sel_w_out[j]!s:>6}  {central[j]: .5e}  {stat[j]: .3e}"
     s += f"  {A_rel[j]: .3e}  {B_rel[j]: .3e}"
     s += f"  {digits[j]:6d}" if digits[j] is not None else "     dbl"
-    if stat[j] > 0 and sys_[j] > stat[j]:
-        s += "  [lambda-unstable]"
     print(s)
 print("")
 print(" central = g.C with g the HLT coefficients at lambda; stat = jackknife error of")
-print(" g.C (exactly the linearly propagated error, the estimate is linear in C);")
-print(" sys = |g(lambda/10).C - g(lambda).C| is stored as the '!lambda' variation so")
-print(" that tcov() reproduces total = stat (+) sys.")
+print(" g.C (exactly the linearly propagated error, the estimate is linear in C).")
+print(" No lambda systematic is included: estimate it from runs at several lambda.")
 print(" A/A0 is the relative L2 mismatch of the reconstructed kernel: the estimate")
 print(" is of int rho kbar, not of int rho k.  Nothing bounds int rho (k - kbar)")
 print(" here -- compare with jks_plsa, whose band contains that mismatch rigorously.")
 print(" digits: mpmath working precision of the solve (dbl: double precision,")
 print(" used where the condition bound is <= 1e6).")
-print(" [lambda-unstable] (sys > stat): the estimate has not reached the stability")
-print(" plateau; lower lambda.")
-nun = int(np.sum((stat > 0) & (sys_ > stat)))
-if nun:
-    print("")
-    print(f"WARNING: {nun} of {p} output weights are lambda-unstable (sys > stat).")
 print("")
 
-desc = ("HLT (arXiv:1903.06476) linear estimate, lambda=%g, alpha=%g, "
-        "W = (1-lambda) A/A0 + lambda B/C_0^2 with trapezoidal A on omega grid tag "
-        "'%s' [%g..%g] x %d nodes, full input covariance.  stat blocks = g.C per "
-        "resample.  shift = |g(lambda/10).C - g(lambda).C|.  Input weights: %s"
-        % (lam, alpha, omega_grid, min(omega_grid_arr), max(omega_grid_arr), K, sel_w_in))
-jk = jk.addvar("lambda", central + sys_, desc)
 res.add(tag_out, jk)
 
 res.save(db)
