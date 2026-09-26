@@ -19,14 +19,12 @@
 #
 import jks, sys, os, numpy as np
 if len(sys.argv) not in (8, 9, 10):
-    print("%s database.jks tag_in list_of_weights_in list_of_weights_out omega_grid tag_out lambda [alpha [p]]" % sys.argv[0])
+    print("%s database.jks tag_in list_of_weights_in list_of_weights_out omega_grid list_of_tags_out lambda [alpha [p]]" % sys.argv[0])
     print("")
-    print("Linear (Hansen-Lupo-Tantalo, arXiv:1903.06476) estimate of the output weights.")
-    print("Same calling convention and storage as jks_plsa; no positivity is used.")
-    print("")
-    print("- list_of_weights_X accepts a list of")
-    print("  a) in integer t for which exp(-t*omega) will be used as the spectral weight")
-    print("  b) a string tag to a weight")
+    print("Stores the kernels that jks_hlt would use (Hansen-Lupo-Tantalo,")
+    print("arXiv:1903.06476) as weights on omega_grid, without evaluating them.")
+    print("Arguments as for jks_hlt, except that list_of_tags_out holds one tag per")
+    print("output weight.")
     print("")
     print("- each output weight k is approximated by  kbar(omega) = sum_i g_i w_in_i(omega),")
     print("  g minimizing")
@@ -34,20 +32,19 @@ if len(sys.argv) not in (8, 9, 10):
     print("    A[g] = int_grid d omega exp(alpha omega) omega^(2p) (k(omega) - kbar(omega))^2")
     print("    B[g] = g^T Cov g")
     print("  (integral by the trapezoidal rule on omega_grid, C_0 the mean of the first")
-    print("  input weight).  The output is g.C, its jackknife blocks g.C^(b).")
+    print("  input weight).  kbar is stored under the corresponding tag of")
+    print("  list_of_tags_out.  g depends on the data only through Cov and C_0, so kbar")
+    print("  is the same in every jackknife block.")
     print("")
-    print("- lambda in (0, 1): small lambda = faithful kernel, large statistical error.")
-    print("  Only the statistical error is stored; the lambda dependence (and the")
-    print("  omega_grid dependence) is left to be estimated by running at several values.")
-    print("- alpha (default 0): exponential weight of the kernel norm A.")
-    print("- p (default 0): power weight of the kernel norm A.  This is the same as")
-    print("  scaling all input AND output weights by omega^p (the data and the")
-    print("  estimated quantity are unchanged, only the norm of k - kbar is).")
+    print("- kbar lies exactly in the span of the input weights.  Used as an output")
+    print("  weight of jks_plsa with the same input weights, the band of int rho kbar")
+    print("  shows what spectral positivity adds to the HLT estimate of the same")
+    print("  quantity (without positivity its error would be the HLT statistical error).")
     print("")
-    print("- Note that an error on omega_grid is not propagated, use multiple omega_grid if needed")
+    print("- lambda in (0, 1), alpha (default 0), p (default 0): as for jks_hlt.")
     sys.exit(0)
 
-db, tag_in, list_w_in, list_w_out, omega_grid, tag_out = sys.argv[1:7]
+db, tag_in, list_w_in, list_w_out, omega_grid, list_tags_out = sys.argv[1:7]
 lam = float(sys.argv[7])
 alpha = float(sys.argv[8]) if len(sys.argv) >= 9 else 0.0
 pw = float(sys.argv[9]) if len(sys.argv) == 10 else 0.0
@@ -58,7 +55,7 @@ res = jks.resamples(db)
 omega_grid_arr = np.asarray(res.get(omega_grid).mean(), float)
 K = len(omega_grid_arr)
 
-print(f"HLT linear estimate on energy grid [{min(omega_grid_arr)},..,{max(omega_grid_arr)}] "
+print(f"HLT kernels on energy grid [{min(omega_grid_arr)},..,{max(omega_grid_arr)}] "
       f"({K} resolution), lambda = {lam:g}, alpha = {alpha:g}, p = {pw:g}")
 
 # Unlike jks_plsa, no column rescaling: the kernel norm A[g] is a statement about
@@ -105,47 +102,45 @@ evs = sorted(evs.real)
 kappa = abs(evs[-1] / evs[0])
 print(f"Covariance condition number: {kappa:e}")
 assert kappa < 1e10, f"Problematic condition number of covariance {kappa}"
+tags_out = eval(list_tags_out)
+assert isinstance(tags_out, list) and all(isinstance(t, str) for t in tags_out), \
+    "list_of_tags_out must be a list of strings"
+assert len(tags_out) == len(w_out), \
+    f"list_of_tags_out has {len(tags_out)} entries for {len(w_out)} output weights"
+assert len(set(tags_out)) == len(tags_out), "list_of_tags_out has duplicate tags"
+exist = [t for t in tags_out if t in res.set]
+assert not exist, f"tags already in the database: {exist}"
+
 try:
     hlt = jks.hlt.solver(w_in, list_w_in, w_out, list_w_out, c_in_cv, c_mn, omega_grid_arr,
                          lam, alpha, pw)
 except RuntimeError as e:
     print(f"ERROR: {e}.")
-    print("  Refusing to store non-converged values in the database.")
+    print("  Refusing to store non-converged kernels in the database.")
     sys.exit(1)
-A_rel, B_rel, digits = hlt.A_rel, hlt.B_rel, hlt.digits
-p = hlt.p
 
-central = hlt.estimate(c_mn)
-
-# stat blocks: the estimate is linear in the data, so the jackknife blocks are g.C^(b)
-jk = res.apply(lambda r: hlt.estimate(get_c_in(r)))
-stat = np.sqrt(np.clip(np.array(jk.cov()).diagonal(), 0.0, None))
-
-dmp = [d for d in digits if d is not None]
+dmp = [d for d in hlt.digits if d is not None]
 if dmp:
-    print(f"mpmath used for {len(dmp)} of {p} output weights ({min(dmp)}..{max(dmp)} digits, "
+    print(f"mpmath used for {len(dmp)} of {hlt.p} output weights ({min(dmp)}..{max(dmp)} digits, "
           f"each verified against a solve with 20 fewer digits)")
 else:
     print("double precision sufficient for all output weights")
 print("")
-print(" out    central       stat        A/A0        B/C0^2    digits")
-for j in range(p):
-    s = f" {sel_w_out[j]!s:>6}  {central[j]: .5e}  {stat[j]: .3e}"
-    s += f"  {A_rel[j]: .3e}  {B_rel[j]: .3e}"
-    s += f"  {digits[j]:6d}" if digits[j] is not None else "     dbl"
+print(" out    tag                   A/A0        B/C0^2    digits")
+for j in range(hlt.p):
+    s = f" {sel_w_out[j]!s:>6}  {tags_out[j]:20s}  {hlt.A_rel[j]: .3e}  {hlt.B_rel[j]: .3e}"
+    s += f"  {hlt.digits[j]:6d}" if hlt.digits[j] is not None else "     dbl"
     print(s)
 print("")
-print(" central = g.C with g the HLT coefficients at lambda; stat = jackknife error of")
-print(" g.C (exactly the linearly propagated error, the estimate is linear in C).")
-print(" No lambda systematic is included: estimate it from runs at several lambda.")
-print(" A/A0 is the relative L2 mismatch of the reconstructed kernel: the estimate")
-print(" is of int rho kbar, not of int rho k.  Nothing bounds int rho (k - kbar)")
-print(" here -- compare with jks_plsa, whose band contains that mismatch rigorously.")
+print(" A/A0 is the relative L2 mismatch of the stored kernel kbar from the output")
+print(" weight k; B/C0^2 is the relative statistical error of int rho kbar.")
 print(" digits: mpmath working precision of the solve (dbl: double precision,")
-print(" used where the condition bound is <= 1e6).")
+print(" used where the condition bound is <= 1e6); kbar is formed at that precision.")
 print("")
 
-res.add(tag_out, jk)
+for j, t in enumerate(tags_out):
+    kbar = hlt.kernel(j)
+    res.add(t, res.apply(lambda r: kbar))
 
 res.save(db)
 

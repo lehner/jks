@@ -23,6 +23,7 @@ from jks.fit import fit
 import jks.corrIO
 import jks.positive_laplace
 import jks.bounded_laplace
+import jks.hlt
 
 def qfit(
     mn,
