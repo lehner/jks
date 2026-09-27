@@ -233,6 +233,16 @@ class db_page:
             self.title.text = self.file + "  (changed on disk)"
 
 
+@app.get("/jks_figure/{key}.pdf")
+def figure(key: str):
+    # figures of plot nodes (behind the token middleware like everything else)
+    from fastapi.responses import FileResponse, Response
+    p = flowview.FIGURES.get(key)
+    if not p or not os.path.exists(p):
+        return Response(status_code=404)
+    return FileResponse(p, media_type="application/pdf")
+
+
 @ui.page("/")
 async def index(file: str = ""):
     if file and flowview.is_flow(file):

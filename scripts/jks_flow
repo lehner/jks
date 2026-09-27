@@ -29,6 +29,8 @@ usage = """%s command flow.sh [...]
   log flow.sh id                     output of the step that computed a node
   source flow.sh id path             add a source database
   list flow.sh id word ...           add a list of words for loops ($(jks_list_values id))
+  plot flow.sh id input out.pdf cmd ...  add a jks_plot2 figure of node input (out.pdf: - keeps
+                                     it in the cache); cmd as for jks_plot2, e.g. c1:C:title
   add flow.sh id parent script args  add a step; parent - for scripts that write a new
                                      database; @ is the node's database, @id another node's
   rm flow.sh id                      remove a node nobody reads
@@ -39,7 +41,7 @@ usage = """%s command flow.sh [...]
 The flow file is a bash script; "bash flow.sh" replays it without the cache.  Loops
 (jks_begin/for/jks_apply/done) are written into the file directly.""" % sys.argv[0]
 
-if len(sys.argv) < 3 or sys.argv[1] not in ("status", "run", "export", "log", "source", "list", "add", "rm", "rebase", "fmt", "gc"):
+if len(sys.argv) < 3 or sys.argv[1] not in ("status", "run", "export", "log", "source", "list", "plot", "add", "rm", "rebase", "fmt", "gc"):
     print(usage)
     sys.exit(0)
 
@@ -59,7 +61,7 @@ def size(n):
 
 
 try:
-    if cmd in ("source", "list", "add") and not os.path.exists(fn):
+    if cmd in ("source", "list", "plot", "add") and not os.path.exists(fn):
         fl = flow.flow(fn)
     else:
         fl = flow.flow.load(fn)
@@ -72,6 +74,8 @@ try:
                 what = "source %s" % n.source
             elif n.kind == "list":
                 what = "list " + " ".join(n.values)
+            elif n.kind == "plot":
+                what = "plot %s -> %s (%d commands)" % (n.plot["script"], n.plot["out"], len(n.plot["cmds"]))
             elif n.kind == "step":
                 env, words = n.cmd.words()
                 what = " ".join(env + words)
@@ -102,7 +106,9 @@ try:
         for i in fl.nodes:
             if i in res:
                 r = res[i]
-                if r["ok"]:
+                if r.get("delivered"):
+                    print("%-16s copied the stored figure to %s" % (i, fl.nodes[i].plot["out"]))
+                elif r["ok"]:
                     extra = ", %s over %d iterations, %d script run%s" % (
                         r["mode"], r["iterations"], r["computed"], "" if r["computed"] == 1 else "s") if "mode" in r else ""
                     print("%-16s done in %.2fs, stored %s (%s)%s" % (i, r["seconds"], r["stored"], size(r["bytes"]), extra))
@@ -142,6 +148,12 @@ try:
         if len(args) != 2:
             fail("source flow.sh id path")
         fl.add(flow.node(args[0], "source", source=args[1]))
+        fl.save()
+
+    elif cmd == "plot":
+        if len(args) < 4:
+            fail("plot flow.sh id input out.pdf cmd ...")
+        fl.add(flow.node(args[0], "plot", args[1], plot={"script": "jks_plot2", "out": args[2], "cmds": args[3:]}))
         fl.save()
 
     elif cmd == "list":

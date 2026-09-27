@@ -20,6 +20,7 @@
 # correlations and per-configuration outlier view of one database.
 # Built as a component on a `database` so it can serve as a node inspector.
 #
+import re
 import numpy as np
 import plotly.graph_objects as go
 from nicegui import ui
@@ -80,7 +81,7 @@ def _human(m, errs, etags):
 
 class database_view:
     def __init__(self, db, dark, diff=None, ref=None, fit_source=None, inputs=(), fit=None, on_delete=None,
-                 height="calc(100vh - 5rem)", scan=None):
+                 height="calc(100vh - 5rem)", scan=None, on_make_plot=None):
         # scan: {"var": name, "values": [...], "series": {template: [tag per value]}} of a loop node
         # diff, ref: preview of a step, compared with the database ref
         # inputs: tags the step read; fit: fit tag the step wrote (shown in the fit overlay)
@@ -90,6 +91,7 @@ class database_view:
         self.on_delete = on_delete  # async callback(tags) removing tags from the database
         self.height = height
         self.scan = scan
+        self.on_make_plot = on_make_plot  # callback(jks_plot2 commands) making a plot node
         self.dark = dark
         self.diff, self.ref = diff, ref
         self.change = {}
@@ -163,6 +165,9 @@ class database_view:
                             ui.select(QUANTITIES, value=self.quantity, label="show",
                                       on_change=lambda e: self.set_quantity(e.value)).props("dense").classes("w-72")
                             self.dodge = ui.checkbox("offset tags in x", value=False, on_change=self.update_plot)
+                            if self.on_make_plot is not None:
+                                ui.button("as a plot node", icon="insert_chart", on_click=self.make_plot) \
+                                    .props("flat dense size=sm").tooltip("a jks_plot2 figure of this view, saved with the flow")
                             ui.label("error bars as jks_plot2: inner statistical, outer stat and sys in quadrature"
                                      ).classes("text-xs opacity-70")
                         self.build_fit_overlay()
@@ -197,6 +202,38 @@ class database_view:
             self.set_selected(first)
         else:
             self.update_all()
+
+    def make_plot(self):
+        # the view as jks_plot2 commands
+        cmds, notes = [], []
+        if self.quantity in ("meff", "relerr", "budget"):
+            notes.append("jks_plot2 draws values; the %s view is not carried over" % QUANTITIES[self.quantity])
+        if self.quantity == "abs":
+            cmds.append("ls:y")
+        lt = {}
+        for k, tag in enumerate(self.selected):
+            lt[tag] = k + 1
+            cmds.append("c%d:%s:%s" % (k + 1, tag, tag))
+        fit, tag, j = self.fit_sel.value, self.fit_tag.value, self.fit_range.value
+        src = (self.fit_src.value or "").strip()
+        if fit != "(none)" and tag and j is not None and src:
+            if "r[" in src:
+                notes.append("the fit function uses r[...], which jks_plot2 cannot evaluate: no fit band")
+            else:
+                js = stats.fit_inputs(self.db.keys(), fit)[tag]
+                P, pval = stats.fit_parameters(self.db.res, fit, len(js), j)
+                off = j * P.shape[1]
+                fnc = re.sub(r"p\[(\d+)\]", lambda m: "p[%d]" % (int(m.group(1)) + off), src) if off else src
+                w = self.fit_window(fit, tag, j, False)
+                lo = self.fit_lo.value if self.fit_lo.value is not None else (w[0] if w else 0)
+                hi = self.fit_hi.value if self.fit_hi.value is not None else (w[1] if w else 1)
+                cmds.append("f%d:%s:%s:%g:%g:fit" % (lt.get(tag, len(lt) + 1), fit, fnc, lo, hi))
+        for n in notes:
+            ui.notify(n, type="info")
+        if not cmds:
+            ui.notify("select tags to plot first", type="warning")
+            return
+        self.on_make_plot(cmds)
 
     def build_fit_overlay(self):
         fits = stats.fit_tags(self.db.keys())

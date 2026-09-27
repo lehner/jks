@@ -147,6 +147,7 @@ jks/gui/history.py     recently used field values (20 per "script:argument", "en
                        "command"), ~/.config/jks_gui/history.json, merged on every save
 jks/flow/core.py       flows: DAG of steps in a bash file (parse/write), engine with keys,
                        status, delta store, parallel runs, export, gc (no GUI imports)
+jks/gui/plotpanel.py   plot panel: jks_plot2 commands as typed rows or text, preview
 jks/gui/flowview.py    flow page: graph (ECharts, layered layout), node inspector
                        (database_view of the node), flow_target for the step panel
 jks/gui/app.py         page, command line, access-token middleware
@@ -170,6 +171,14 @@ scripts/jks_flow       command line for flows (status, run, export, log, add, rm
   only as `$v`/`${v}` in double-quoted jks_apply arguments.  Keep parameter nodes that
   loops read (`jks_add @ lambda "[...]"`) on a side branch: a loop's key has the values,
   not the value node, so adding a value computes one iteration.
+- Plot nodes: `jks_figure id input jks_plot2|jks_plot out.pdf|- cmd ...` (cmd as for jks_plot2).
+  The key has the script, the commands and the input's key but not the output file: the
+  pdf is kept in the store (`<key>.pdf`) and copied to `out` (a missing or changed file makes
+  the node stale, and a run only copies it).  `-` keeps the figure in the cache
+  (`<flow>.work/files/<id>.pdf` in a replay).  `jks_flow plot flow.sh id input out cmd ...`.
+  The GUI shows figures with the browser's pdf viewer (`/jks_figure/<key>.pdf`, behind the
+  token); "as a plot node" in the Plot tab turns the selected tags, log scale and the fit
+  overlay (p indices shifted to the range) into commands.
 - `scripts/jks_values db tag`: elements of a constant tag, one per line (integral values
   without ".0", else shortest round-trip repr); used by both the engine and the replay.
 - Loop modes: map (iterations on the parent, in parallel) if every body script has

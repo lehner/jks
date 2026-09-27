@@ -30,13 +30,16 @@ from jks.gui import database, stats
 from jks.gui.browser import database_view
 from jks.gui.filepicker import file_picker
 from jks.gui.step import MONO, preview_view, step_panel
+from jks.gui.plotpanel import plot_panel
+
+FIGURES = {}  # key -> pdf file, served at /jks_figure/<key>.pdf
 
 STATUS = {  # color, text; status colors are reserved for states and always come with the text
     "ok": ("#0ca30c", "ok"), "stale": ("#fab219", "stale"), "failed": ("#d03b3b", "failed"),
     "missing": ("#ec835a", "input missing"), "new": ("#8f8d86", "not computed"),
     "running": ("#2a78d6", "running"),
 }
-SYMBOL = {"source": "rect", "list": "diamond", "step": "circle", "loop": "roundRect"}
+SYMBOL = {"source": "rect", "list": "diamond", "step": "circle", "loop": "roundRect", "plot": "triangle"}
 
 
 def is_flow(path):
@@ -481,6 +484,8 @@ class flow_page:
         self.procs = []
         self.view = None
         self.panel = None
+        self.plots = None
+        self.mode = "step"  # panel shown in the drawer
         self.target = flow_target(self)
         self.base = self.fl.base
         self.chart_px = (1500.0, 300.0)  # measured in the browser
@@ -542,9 +547,11 @@ class flow_page:
         return await run.io_bound(load)
 
     def parent_db(self):
-        # database the step panel's form offers tags of and checks against: the node the step
-        # starts from (loaded in the background if it is not the one shown)
-        p = self.target.parent()
+        return self.parent_db_for(self.target.parent())
+
+    def parent_db_for(self, p):
+        # database a panel offers tags of and checks against: the node a step starts from or a
+        # plot shows (loaded in the background if it is not the one shown)
         if not p:
             return None
         if p == getattr(self, "shown_id", None):
@@ -567,8 +574,10 @@ class flow_page:
             pass
         finally:
             self.loading.discard(p)
-        if p in self.loaded and self.panel is not None and self.target.parent() == p:
+        if p in self.loaded and self.panel is not None and self.target.parent() == p and self.mode == "step":
             self.panel.render()
+        if p in self.loaded and self.plots is not None and self.plots.input() == p and self.mode == "plot":
+            self.plots.render_rows()
 
     # ---- layout ----
     async def build(self):
@@ -594,7 +603,13 @@ class flow_page:
             self.toolbar = ui.row().classes("w-full items-center gap-2")
             self.body = ui.column().classes("w-full")
         with self.drawer:
-            self.panel = step_panel(self, self.target)
+            self.step_box = ui.column().classes("w-full")
+            self.plot_box = ui.column().classes("w-full")
+            with self.step_box:
+                self.panel = step_panel(self, self.target)
+            with self.plot_box:
+                self.plots = plot_panel(self)
+            self.show_panel("step")
         ui.timer(0.2, self.drain)
         ui.timer(3.0, self.poll)
         await self.measure()
@@ -627,9 +642,10 @@ class flow_page:
             st = (self.states.get(i) if self.busy else None) or self.status.get(i, {}).get("status", "new")
             color, word = STATUS.get(st, STATUS["new"])
             info = self.status.get(i, {})
-            desc = {"source": "source %s" % n.source, "list": "list %s" % " ".join(n.values),
-                    "step": " ".join(n.lines()), "loop": "loop over %s: %s" % (", ".join(n.loop_vars()),
-                                                                              ", ".join(c.name for c in n.body))}[n.kind]
+            desc = {"source": lambda: "source %s" % n.source, "list": lambda: "list %s" % " ".join(n.values),
+                    "step": lambda: " ".join(n.lines()),
+                    "loop": lambda: "loop over %s: %s" % (", ".join(n.loop_vars()), ", ".join(c.name for c in n.body)),
+                    "plot": lambda: "%s figure -> %s: %s" % (n.plot["script"], n.plot["out"], " ".join(n.plot["cmds"]))}[n.kind]()
             tip = "%s — %s%s<br>%s" % (i, word, (" (%s)" % info["reason"]) if info.get("reason") else "",
                                         desc.replace("<", "&lt;")[:300])
             if n.kind == "loop" and info.get("detail"):
@@ -768,18 +784,23 @@ class flow_page:
             ui.space()
             if n.has_db():
                 ui.button("Add step", icon="add", on_click=self.start_add).props("flat dense")
-            if n.kind in ("step", "loop"):
+                ui.button("Add plot", icon="insert_chart", on_click=lambda: self.start_plot()).props("flat dense")
+            if n.kind in ("step", "loop", "plot"):
                 ui.button("Edit", icon="edit", on_click=lambda: self.start_edit(id)).props("flat dense")
+            if n.kind == "plot" and info.get("key") and self.en.figure(info["key"] if st == "ok" else info.get("built") or ""):
+                k = info["key"] if st == "ok" else info.get("built")
+                FIGURES[k] = self.en.figure(k)
+                ui.link("Open PDF", "/jks_figure/%s.pdf" % k, new_tab=True).classes("text-sm")
             elif n.kind == "list":
                 ui.button("Edit", icon="edit", on_click=lambda: self.edit_list(id)).props("flat dense")
             if n.kind in ("step", "loop") and n.parent:
                 ui.button("Rebase", icon="alt_route", on_click=lambda: self.start_rebase(id)).props("flat dense") \
                     .tooltip("start from another node; everything after this node is kept")
-            if st != "ok" and n.kind in ("step", "loop"):
+            if st != "ok" and n.kind in ("step", "loop", "plot"):
                 ui.button("Run", icon="play_arrow", on_click=lambda: self.run_nodes([id])).props("flat dense")
-            if n.kind in ("step", "loop"):
+            if n.kind in ("step", "loop", "plot"):
                 ui.button("Log", icon="article", on_click=lambda: self.show_log(id)).props("flat dense")
-            if n.has_db() and st in ("ok", "stale"):
+            if (n.has_db() or n.kind == "plot") and st in ("ok", "stale"):
                 ui.button("Export", icon="save_alt", on_click=lambda: self.export(id)).props("flat dense")
             if not self.fl.children(id):
                 ui.button("Delete node", icon="delete", on_click=lambda: self.confirm_remove(id)) \
@@ -801,6 +822,11 @@ class flow_page:
             with self.body:
                 ui.label("list %s: %s" % (id, " ".join(n.values))).classes("m-4").style(MONO)
             return
+        if n.kind == "plot":
+            key = info.get("key") if info.get("status") == "ok" else info.get("built")
+            if key and self.en.figure(key):
+                self.show_figure(n, key, stale=info.get("status") == "stale" and info.get("reason"))
+                return
         key = info.get("key") if info.get("status") == "ok" or n.is_source() else \
             info.get("built") if info.get("status") == "stale" else None
         if key is None:
@@ -833,7 +859,7 @@ class flow_page:
                     ui.button("Run", icon="play_arrow", on_click=lambda: self.run_nodes([id])).props("flat dense")
             scan = await self.scan_of(n) if n.kind == "loop" else None
             self.view = database_view(db, self.dark, fit_source=self.fit_source, on_delete=self.propose_rm,
-                                      height="calc(70vh - 7rem)", scan=scan)
+                                      height="calc(70vh - 7rem)", scan=scan, on_make_plot=self.make_plot)
         if self.panel is not None and not self.target.edit and self.panel.result is None:
             self.panel.render()
 
@@ -856,12 +882,54 @@ class flow_page:
             return None
         return {"var": var, "values": [it[var] for it in its], "series": series}
 
+    def show_figure(self, n, key, preview=None, stale=None):
+        # the pdf of a plot node (the browser's pdf viewer), its commands and file
+        FIGURES[key] = core.engine(self.fl, self.en.work).figure(key) if preview else self.en.figure(key)
+        self.body.clear()
+        self.view = None
+        with self.body:
+            if preview is not None:
+                with ui.row().classes("w-full items-center gap-2 px-3 py-1 bg-amber-100 dark:bg-amber-900 rounded"):
+                    ui.icon("visibility")
+                    ui.label("PREVIEW of %s" % n.id).classes("font-bold")
+                    ui.label(" ".join(n.lines())).classes("grow truncate text-xs").style(MONO)
+                    preview.controls()
+            elif stale:
+                with ui.row().classes("w-full items-center gap-2 px-3 py-1 bg-amber-100 dark:bg-amber-900 rounded"):
+                    ui.icon("history")
+                    ui.label("stale (%s): showing the last figure" % stale).classes("text-sm grow")
+                    ui.button("Run", icon="play_arrow", on_click=lambda: self.run_nodes([n.id])).props("flat dense")
+            with ui.row().classes("w-full items-center gap-4 text-xs"):
+                ui.label("%s of %s" % (n.plot["script"], n.parent))
+                ui.label("file: %s" % (n.plot["out"] if n.plot["out"] != "-" else "(kept in the cache)"))
+                ui.link("open in a new tab", "/jks_figure/%s.pdf" % key, new_tab=True)
+            m = self.en.meta(key) or {}
+            for w in m.get("warnings", []):
+                ui.label("⚠ " + w).classes("text-xs text-warning")
+            ui.element("iframe").props('src="/jks_figure/%s.pdf" title="figure %s"' % (key, n.id)) \
+                .classes("w-full jks-figure").style("height: calc(70vh - 9rem); border: 1px solid #8f8d86")
+
+    def make_plot(self, cmds):
+        # a plot node from the browser's current view
+        self.start_plot(cmds)
+
     def active_tag(self):
         v = self.view
         return v.active if v is not None and v.active is not None else None
 
     # ---- actions ----
+    def show_panel(self, mode):
+        self.mode = mode
+        self.step_box.set_visibility(mode == "step")
+        self.plot_box.set_visibility(mode == "plot")
+
+    def start_plot(self, cmds=(), edit=None):
+        self.show_panel("plot")
+        self.drawer.value = True
+        self.plots.start(cmds, edit)
+
     def start_add(self):
+        self.show_panel("step")
         self.target.edit = None
         self.target.loop = None
         self.drawer.value = True
@@ -870,6 +938,10 @@ class flow_page:
 
     def start_edit(self, id):
         n = self.fl.nodes[id]
+        if n.kind == "plot":
+            self.start_plot(edit=id)
+            return
+        self.show_panel("step")
         self.target.edit = id
         self.drawer.value = True
         if n.kind == "loop":
@@ -1056,7 +1128,8 @@ class flow_page:
     async def export(self, id):
         with ui.dialog() as dlg, ui.card().classes("w-[36rem]"):
             ui.label("Export the database of %s" % id).classes("font-bold")
-            path = ui.input("file", value=os.path.join(self.base, id + ".jks")).classes("w-full").style(MONO)
+            ext = ".pdf" if self.fl.nodes[id].kind == "plot" else ".jks"
+            path = ui.input("file", value=os.path.join(self.base, id + ext)).classes("w-full").style(MONO)
 
             async def go():
                 p = os.path.abspath(os.path.expanduser(path.value))

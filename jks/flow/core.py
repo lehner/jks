@@ -73,6 +73,7 @@ ID = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
 REF = re.compile(r"^@([A-Za-z0-9_][A-Za-z0-9_.-]*)?$")
 VAR = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)")
 CHECKPOINT = 8  # a full copy after this many deltas in a row
+PLOTTERS = ("jks_plot2", "jks_plot")  # scripts of plot nodes: script out.pdf in.jks command ...
 
 HEADER = """#!/usr/bin/env bash
 # %s
@@ -113,6 +114,12 @@ jks_apply() {
   shift 2
   _jks_map "$id" "$@"
   "$script" "${_jks_a[@]}"
+}
+jks_figure() {
+  local id=$1 input=$2 script=$3 out=$4
+  shift 4
+  if [[ $out == - ]]; then out="$W/$id.pdf"; else mkdir -p "$(dirname "$out")"; fi
+  "$script" "$out" "$W/$input.jks" "$@"
 }
 jks_list() { local n=$1; shift; printf '%%s\\n' "$@" > "$W/$n.list"; }
 jks_list_values() { cat "$W/$1.list" || kill $$; }
@@ -213,15 +220,17 @@ class command:
 
 
 class node:
-    # kind: source (a database file), list (words), step (one command), loop (commands per iteration)
+    # kind: source (a database file), list (words), step (one command), loop (commands per iteration),
+    # plot (a figure of the parent: plot = {"script", "out" (a path or -), "cmds"})
     def __init__(self, id, kind, parent=None, cmd=None, source=None, values=None, loops=None, body=None,
-                 meta=None, notes=()):
+                 meta=None, notes=(), plot=None):
         self.id, self.kind, self.parent = id, kind, parent
         self.cmd = cmd
         self.source = source
         self.values = list(values or [])
         self.loops = list(loops or [])  # [{"vars": [..], "kind": words|seq|values|list, ...}]
         self.body = list(body or [])  # [command]
+        self.plot = dict(plot) if plot else None
         self.meta = dict(meta or {})
         self.meta["id"] = id
         self.notes = list(notes)
@@ -230,7 +239,7 @@ class node:
         return self.kind == "source"
 
     def has_db(self):
-        return self.kind != "list"
+        return self.kind not in ("list", "plot")
 
     def commands(self):
         return [self.cmd] if self.kind == "step" else self.body
@@ -256,8 +265,11 @@ class node:
         return [v for l in self.loops for v in l["vars"]]
 
     def definition(self):
+        # the output file of a plot is not part of it: moving a figure does not redraw it
         if self.kind == "source":
             return {"source": self.source}
+        if self.kind == "plot":
+            return {"plot": self.plot["script"], "input": self.parent, "cmds": self.plot["cmds"]}
         if self.kind == "list":
             return {"list": self.values}
         if self.kind == "step":
@@ -269,6 +281,10 @@ class node:
             return ["jks_source %s %s" % (self.id, registry.quote(self.source))]
         if self.kind == "list":
             return ["jks_list %s" % self.id + "".join(" " + registry.quote(v) for v in self.values)]
+        if self.kind == "plot":
+            p = self.plot
+            return [" ".join(["jks_figure", self.id, self.parent, p["script"], registry.quote(p["out"])] +
+                             [registry.quote(c) for c in p["cmds"]])]
         if self.kind == "step":
             env, words = self.cmd.words()
             return [" ".join(env + ["jks_step", self.id, self.parent or "-"] + words)]
@@ -371,13 +387,16 @@ class flow:
             n = node(words[1], "source", source=words[2], meta=meta, notes=notes)
         elif len(words) >= 2 and words[0] == "jks_list" and not env:
             n = node(words[1], "list", values=words[2:], meta=meta, notes=notes)
+        elif len(words) >= 5 and words[0] == "jks_figure" and not env:
+            n = node(words[1], "plot", words[2], meta=meta, notes=notes,
+                     plot={"script": words[3], "out": words[4], "cmds": words[5:]})
         elif len(words) >= 4 and words[0] == "jks_step":
             if any("$" in x for x in list(env.values()) + words):
                 raise FlowError("%s: variables are only allowed inside loops" % where)
             n = node(words[1], "step", None if words[2] == "-" else words[2], command(words[3], words[4:], env),
                      meta=meta, notes=notes)
         else:
-            raise FlowError("%s: expected jks_source, jks_list, jks_step or jks_begin" % where)
+            raise FlowError("%s: expected jks_source, jks_list, jks_step, jks_begin or jks_figure" % where)
         if n.id != meta["id"]:
             raise FlowError("%s: the command is for %s but #@jks names %s" % (where, n.id, meta["id"]))
         return n
@@ -505,6 +524,18 @@ class flow:
             for v in n.values:
                 if v == "" or re.search(r"\s", v):
                     raise FlowError("%s: list values must be words without spaces" % n.id)
+            return
+        if n.kind == "plot":
+            if n.parent not in self.nodes or not self.nodes[n.parent].has_db():
+                raise FlowError("%s: a plot needs a database node to show" % n.id)
+            if n.plot["script"] not in PLOTTERS:
+                raise FlowError("%s: plots are made with %s" % (n.id, " or ".join(PLOTTERS)))
+            if not n.plot["cmds"]:
+                raise FlowError("%s: the plot has no commands" % n.id)
+            if not n.plot["out"] or (n.plot["out"] != "-" and not n.plot["out"].endswith(".pdf")):
+                raise FlowError("%s: the plot is written to a .pdf file (or - to keep it in the cache)" % n.id)
+            if any("$" in c for c in n.plot["cmds"]):
+                raise FlowError("%s: variables are only allowed inside loops" % n.id)
             return
         if n.kind == "loop":
             if n.parent is None:
@@ -783,6 +814,10 @@ class engine:
                 if r in self._why and self._why[r].startswith("missing"):
                     raise FlowError("input %s missing" % r)
                 raise NotReady("waits for %s" % r)
+        if n.kind == "plot":
+            d = {"script": [runner.file_hash(registry.script_path(n.plot["script"]))], "code": code_hash(),
+                 "def": n.definition(), "inputs": {n.parent: keys[n.parent]}}
+            return _hash(d)
         if n.kind == "step":
             d = {"script": self.scripts([n.cmd]), "code": code_hash(), "def": n.definition(),
                  "inputs": dict((r, keys[r]) for r in n.inputs()), "external": self.external([n.cmd])}
@@ -860,6 +895,20 @@ class engine:
         m = self.meta(key)
         return m is not None and os.path.exists(os.path.join(self.store, m["file"]))
 
+    def delivered(self, n, key):
+        # a figure is where the flow says (plots saved to disk)
+        if n.kind != "plot" or n.plot["out"] == "-":
+            return True
+        m, f = self.meta(key), self.path(n.plot["out"])
+        return m is not None and os.path.exists(f) and runner.file_hash(f) == m.get("sha")
+
+    def deliver(self, n, key):
+        if n.kind == "plot" and n.plot["out"] != "-":
+            f = self.path(n.plot["out"])
+            os.makedirs(os.path.dirname(f) or ".", exist_ok=True)
+            shutil.copyfile(os.path.join(self.store, self.meta(key)["file"]), f + ".part")
+            os.replace(f + ".part", f)
+
     def status(self):
         # per node: ok, stale (an older result exists), new, failed, missing (input file)
         keys, state = self.keys(), self._read_json("state.json")
@@ -871,6 +920,9 @@ class engine:
             r = {"id": n.id, "key": k, "built": built, "reason": "", "detail": ""}
             if k is None and self._why.get(n.id, "").startswith("missing"):
                 r["status"], r["reason"] = "missing", self._why[n.id][9:]
+            elif k is not None and self.have(k) and not self.delivered(n, k):
+                r["status"] = "stale"
+                r["reason"] = "output file changed" if os.path.exists(self.path(n.plot["out"])) else "output file missing"
             elif k is not None and self.have(k):
                 r["status"] = "ok"
             elif k is not None and failed.get("key") == k:
@@ -880,7 +932,8 @@ class engine:
                 bm = self.meta(built)
                 if bm and bm.get("def") != n.definition():
                     r["reason"] = "definition changed"
-                elif bm and (bm.get("code") != code_hash() or bm.get("script") != self.scripts(n.commands())):
+                elif bm and n.kind != "plot" and (bm.get("code") != code_hash() or
+                                                  bm.get("script") != self.scripts(n.commands())):
                     r["reason"] = "code changed"
                 elif bm and n.kind == "loop" and k is not None and bm.get("values") != self.iterations(n, keys):
                     r["reason"] = "values changed"
@@ -973,6 +1026,11 @@ class engine:
         keys = self.keys()
         k = keys.get(id)
         n = self.flow.nodes[id]
+        if n.kind == "plot":
+            if not self.have(k):
+                raise FlowError("%s is not computed; run it first" % id)
+            shutil.copyfile(self.figure(k), target)
+            return
         if not n.has_db():
             raise FlowError("%s is a list" % id)
         if not self.have(k):
@@ -1003,7 +1061,8 @@ class engine:
             if keys[i] is None and self._why.get(i, "").startswith("missing"):
                 raise FlowError("%s: %s" % (i, self._why[i]))
         todo = [i for i in self.flow.nodes if i in want and
-                (keys[i] is None or not self.have(keys[i]) or (force and targets and i in targets))]
+                (keys[i] is None or not self.have(keys[i]) or not self.delivered(self.flow.nodes[i], keys[i]) or
+                 (force and targets and i in targets))]
         os.makedirs(self.store, exist_ok=True)
         self.sem = asyncio.Semaphore(jobs)
         loop = asyncio.get_running_loop()
@@ -1021,10 +1080,18 @@ class engine:
                 if keys[i] is None:
                     keys[i] = self.key(n, keys)  # its inputs exist now
                 if self.have(keys[i]) and not (force and targets and i in targets):
+                    if not self.delivered(n, keys[i]):
+                        self.deliver(n, keys[i])
+                        results[i] = {"ok": True, "id": i, "key": keys[i], "seconds": 0.0, "stored": "plot",
+                                      "bytes": 0, "log": "", "delivered": True}
+                        self.record(n, keys[i], results[i])
                     done[i].set_result(True)
                     return
                 state(i, "running")
-                if n.kind == "loop":
+                if n.kind == "plot":
+                    async with self.sem:
+                        res = await self.build_plot(n, keys, lambda line: log(i, line), procs)
+                elif n.kind == "loop":
                     res = await self.build_loop(n, keys, lambda line: log(i, line), procs)
                 else:
                     async with self.sem:
@@ -1050,6 +1117,46 @@ class engine:
             state["failed"][n.id] = {"key": key, "error": res["error"],
                                      "log": "\n".join(res.get("log", "").splitlines()[-200:])}
         self._write_json("state.json", state)
+
+    async def build_plot(self, n, keys, log, procs):
+        # the figure of the input node, kept in the store and copied to its file
+        key = keys[n.id]
+        tmp = os.path.join(self.work, "tmp", "%s-%d" % (key, os.getpid()))
+        shutil.rmtree(tmp, ignore_errors=True)
+        os.makedirs(tmp)
+        t0 = time.time()
+        res = {"ok": False, "error": None, "key": key, "id": n.id, "log": ""}
+        try:
+            out = os.path.join(tmp, n.id + ".pdf")
+            src = self.file_of(self.flow.nodes[n.parent], keys[n.parent], tmp)
+            rc, lines = await runner.execute(n.plot["script"], [out, src] + n.plot["cmds"], {}, self.flow.base, log, procs)
+            res["log"] = "\n".join(lines)
+            if rc != 0:
+                raise FlowError("%s failed (exit code %d)" % (n.plot["script"], rc))
+            if not os.path.exists(out):
+                raise FlowError("%s drew nothing: %s" % (n.plot["script"], " ".join(l for l in lines if "rror" in l)[:300]))
+            os.makedirs(self.store, exist_ok=True)
+            os.replace(out, os.path.join(self.store, key + ".pdf"))
+            m = {"key": key, "id": n.id, "command": " ".join(n.lines()), "def": n.definition(), "code": code_hash(),
+                 "created": str(datetime.datetime.now()), "log": res["log"], "stored": "plot", "file": key + ".pdf",
+                 "sha": runner.file_hash(os.path.join(self.store, key + ".pdf")),
+                 "warnings": [l for l in lines if l.startswith("Error") or "Unknown command" in l]}
+            m["bytes"] = os.path.getsize(os.path.join(self.store, m["file"]))
+            with open(os.path.join(self.store, key + ".json"), "w") as f:
+                json.dump(m, f, indent=1)
+            self.deliver(n, key)
+            res.update(ok=True, stored="plot", bytes=m["bytes"])
+        except Exception as e:
+            res["error"] = str(e) if isinstance(e, FlowError) else "%s: %s" % (type(e).__name__, e)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        res["seconds"] = round(time.time() - t0, 3)
+        return res
+
+    def figure(self, key):
+        # path of a stored figure
+        m = self.meta(key)
+        return os.path.join(self.store, m["file"]) if m and m.get("stored") == "plot" else None
 
     async def build_step(self, n, keys, log, procs):
         base = keys[n.parent] if n.parent else None
