@@ -328,8 +328,9 @@ class flow_target:
             l.update(vars=v if len(v) > 1 else v + ["y"], kind="words", words=[], row="row")
         else:
             l.update(vars=v[:1], kind=kind)
-            l.update({"list": {}, "values": {"node": None, "tag": ""}, "words": {"words": []},
-                      "seq": {"seq": [1, 1, 10]}}[kind])
+            lists = [i for i, n in self.page.fl.nodes.items() if n.kind == "list"]
+            l.update({"list": {"list": lists[-1]} if lists else {}, "values": {"node": None, "tag": ""},
+                      "words": {"words": []}, "seq": {"seq": [1, 1, 10]}}[kind])
         panel.render()
 
     def update_hint(self):
@@ -393,8 +394,8 @@ class flow_target:
                 " ".join("%s=%s" % kv for kv in it.items()) for it in its[:6]) + (" ..." if len(its) > 6 else ""))
         except core.NotReady:
             text = "values: the node that holds them is not computed yet"
-        except (core.FlowError, ValueError, AssertionError, OSError) as e:
-            text = str(e)
+        except Exception as e:  # a background task: show the problem instead of raising
+            text = str(e) if isinstance(e, (core.FlowError, ValueError, OSError)) else "%s: %s" % (type(e).__name__, e)
         if seq != self._seq:
             return
         try:
@@ -771,6 +772,9 @@ class flow_page:
                 ui.button("Edit", icon="edit", on_click=lambda: self.start_edit(id)).props("flat dense")
             elif n.kind == "list":
                 ui.button("Edit", icon="edit", on_click=lambda: self.edit_list(id)).props("flat dense")
+            if n.kind in ("step", "loop") and n.parent:
+                ui.button("Rebase", icon="alt_route", on_click=lambda: self.start_rebase(id)).props("flat dense") \
+                    .tooltip("start from another node; everything after this node is kept")
             if st != "ok" and n.kind in ("step", "loop"):
                 ui.button("Run", icon="play_arrow", on_click=lambda: self.run_nodes([id])).props("flat dense")
             if n.kind in ("step", "loop"):
@@ -876,6 +880,73 @@ class flow_page:
         else:
             self.target.loop = None
             self.panel.load_command(n.cmd.name, n.cmd.argv, n.cmd.env)
+
+    def start_rebase(self, id):
+        n = self.fl.nodes[id]
+        after = sorted(self.fl.descendants(id), key=list(self.fl.nodes).index)
+        bad = self.fl.descendants(id) | {id, n.parent}
+        choices = [i for i, m in self.fl.nodes.items() if m.has_db() and i not in bad]
+        with ui.dialog() as dlg, ui.card().classes("w-[36rem] max-w-full"):
+            ui.label("Rebase %s" % id).classes("text-lg font-bold")
+            ui.label("%s starts from %s now. Its definition and everything after it stay; they are recomputed "
+                     "on the new input." % (id, n.parent)).classes("text-sm")
+            q = ui.select(choices, label="new input node", with_input=True).classes("w-full")
+            ui.label("recomputed: %s" % ", ".join([id] + after)).classes("text-xs opacity-70 break-all")
+
+            async def go():
+                if not q.value:
+                    self.notify("choose the new input node", type="warning")
+                    return
+                dlg.close()
+                await self.preview_rebase(id, q.value)
+            with ui.row():
+                ui.button("Preview", icon="play_arrow", on_click=go)
+                ui.button("Cancel", on_click=dlg.close).props("flat")
+        dlg.open()
+
+    async def preview_rebase(self, id, parent):
+        fl = self.fl.copy()
+        try:
+            fl.rebase(id, parent)
+        except core.FlowError as e:
+            self.notify(str(e), type="negative")
+            return
+        self.body.clear()
+        with self.body, ui.row().classes("m-4 items-center"):
+            ui.spinner()
+            ui.label("computing %s on %s ..." % (id, parent))
+        res = await self.engine_run(fl, [id])
+        r = res.get(id, {"ok": True})
+        if not r["ok"]:
+            self.body.clear()
+            with self.body:
+                ui.label("ERROR: %s on %s: %s" % (id, parent, r["error"])).classes("m-4 text-negative whitespace-pre-wrap")
+                ui.code(r.get("log", "")[-4000:]).classes("w-full max-h-[40vh] overflow-auto")
+                ui.button("Back", on_click=self.show_node).props("flat")
+            return
+        child = await self.node_db(fl, id)
+        ref = await self.node_db(fl, parent)
+        d = await run.io_bound(runner.diff, ref.res, child.res)
+        n = fl.nodes[id]
+        c = n.cmd if n.kind == "step" else n.body[0]
+        result = {"ok": True, "child": child, "ref": ref, "diff": d, "name": c.name, "argv": c.argv, "env": c.env,
+                  "command": " ".join(n.lines()) if n.kind == "step" else "loop %s on %s" % (id, parent)}
+
+        def controls():
+            async def save():
+                try:
+                    self.fl.rebase(id, parent)
+                    self.save()
+                except core.FlowError as e:
+                    self.notify(str(e), type="negative")
+                    return
+                await self.after_change(id, True)
+            ui.button("Save rebase onto %s" % parent, icon="check", on_click=save).props("color=positive")
+            ui.button("Discard", icon="close", on_click=self.show_node).props("flat")
+        self.body.clear()
+        with self.body:
+            self.view = preview_view(result, self.dark, self.fit_source, controls, height="calc(70vh - 9rem)",
+                                     title="PREVIEW of %s on %s" % (id, parent))
 
     def edit_list(self, id):
         n = self.fl.nodes[id]

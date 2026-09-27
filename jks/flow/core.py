@@ -61,7 +61,7 @@
 # files, the jks library, the definition, the keys of the nodes read and the
 # content of external databases (size/mtime of glob-matched files).
 #
-import asyncio, datetime, fnmatch, glob, hashlib, itertools, json, os, pickle, re, shlex, shutil, \
+import asyncio, copy, datetime, fnmatch, glob, hashlib, itertools, json, os, pickle, re, shlex, shutil, \
     subprocess, sys, time
 import lz4.frame
 import numpy as np
@@ -239,7 +239,10 @@ class node:
         return _refs([a for c in self.commands() for a in c.argv])
 
     def value_inputs(self):
-        return [l["node"] if l["kind"] == "values" else l["list"] for l in self.loops if l["kind"] in ("values", "list")]
+        # nodes holding loop values (levels still being edited may not name one yet)
+        out = [l.get("node") if l["kind"] == "values" else l.get("list") for l in self.loops
+               if l["kind"] in ("values", "list")]
+        return [r for r in out if r]
 
     def inputs(self):
         # all nodes this node depends on
@@ -510,6 +513,12 @@ class flow:
             if len(set(names)) != len(names) or "W" in names:
                 raise FlowError("%s: loop variables must be distinct (and not W)" % n.id)
             for l in n.loops:
+                if l["kind"] == "values" and not (l.get("node") and l.get("tag")):
+                    raise FlowError("%s: choose the node and the tag the loop values come from" % n.id)
+                if l["kind"] == "list" and not l.get("list"):
+                    raise FlowError("%s: choose the list the loop runs over" % n.id)
+                if l["kind"] == "seq" and not l.get("seq"):
+                    raise FlowError("%s: seq needs first, step and last" % n.id)
                 if l["kind"] == "values" and l["node"] in self.nodes and not self.nodes[l["node"]].has_db():
                     raise FlowError("%s: jks_values needs a database node" % n.id)
                 if l["kind"] == "list" and (l["list"] not in self.nodes or self.nodes[l["list"]].kind != "list"):
@@ -561,6 +570,38 @@ class flow:
         ids = list(self.nodes)
         self.check(n, set(ids[: ids.index(n.id)]))
         self.nodes[n.id] = n
+
+    def rebase(self, id, parent):
+        # node id (and everything after it) starts from parent instead; the file is reordered
+        # if parent comes later
+        n = self.nodes.get(id)
+        if n is None or n.kind not in ("step", "loop") or n.parent is None:
+            raise FlowError("%s does not start from another node" % id)
+        if parent not in self.nodes or not self.nodes[parent].has_db():
+            raise FlowError("%s is not a database node" % parent)
+        if parent == id or parent in self.descendants(id):
+            raise FlowError("%s comes after %s: rebasing would make a cycle" % (parent, id))
+        m = copy.copy(n)  # nodes may be shared with copies of the flow
+        m.parent = parent
+        self.nodes[id] = m
+        self.reorder()
+
+    def reorder(self):
+        # stable topological order: every node after the nodes it reads
+        todo, placed, out = list(self.nodes), set(), []
+        while todo:
+            for k, i in enumerate(todo):
+                if all(r in placed for r in self.nodes[i].inputs()):
+                    break
+            else:
+                raise FlowError("the flow has a cycle through %s" % ", ".join(todo))
+            out.append(todo.pop(k))
+            placed.add(out[-1])
+        self.nodes = dict((i, self.nodes[i]) for i in out)
+        before = set()
+        for i, n in self.nodes.items():
+            self.check(n, before)
+            before.add(i)
 
     def remove(self, id):
         users = [n.id for n in self.nodes.values() if id in n.inputs()]

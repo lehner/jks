@@ -212,7 +212,10 @@ scripts/jks_flow       command line for flows (status, run, export, log, add, rm
   a body of one or more commands (chips; the form edits one), and the mode; `$var` is
   allowed in every field and the command box quotes such arguments with double quotes.
   Loop and list nodes are edited like steps (descendants recompute, unchanged
-  iterations come from the cache).  A loop over one variable gets a Scan tab in the
+  iterations come from the cache).  Rebase (`flow.rebase`, `jks_flow rebase`, GUI button
+  with preview) gives a step or loop another parent; its descendants stay, the file is
+  reordered (stable topological order) if the new parent came later; cycles are refused.
+  A step can be turned into a loop with the same id.  A loop over one variable gets a Scan tab in the
   inspector: each output template (e.g. C.hlt.$lam) against the loop value.
 - Deleting tags from the tag panel runs `jks_rm` with `glob.escape`d names and commits
   only if the diff removes exactly the selected tags.

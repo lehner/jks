@@ -32,13 +32,14 @@ usage = """%s command flow.sh [...]
   add flow.sh id parent script args  add a step; parent - for scripts that write a new
                                      database; @ is the node's database, @id another node's
   rm flow.sh id                      remove a node nobody reads
+  rebase flow.sh id parent           let node id (and all after it) start from another node
   fmt flow.sh                        rewrite the file in canonical form
   gc flow.sh [-n]                    delete stored results no node needs (-n: only report)
 
 The flow file is a bash script; "bash flow.sh" replays it without the cache.  Loops
 (jks_begin/for/jks_apply/done) are written into the file directly.""" % sys.argv[0]
 
-if len(sys.argv) < 3 or sys.argv[1] not in ("status", "run", "export", "log", "source", "list", "add", "rm", "fmt", "gc"):
+if len(sys.argv) < 3 or sys.argv[1] not in ("status", "run", "export", "log", "source", "list", "add", "rm", "rebase", "fmt", "gc"):
     print(usage)
     sys.exit(0)
 
@@ -165,6 +166,13 @@ try:
             fail("rm flow.sh id")
         fl.remove(args[0])
         fl.save()
+
+    elif cmd == "rebase":
+        if len(args) != 2:
+            fail("rebase flow.sh id parent")
+        fl.rebase(args[0], args[1])
+        fl.save()
+        print("%s now starts from %s; recompute with: jks_flow run %s" % (args[0], args[1], fn))
 
     elif cmd == "fmt":
         fl.save()
