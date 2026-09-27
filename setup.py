@@ -5,7 +5,7 @@ scripts = glob.glob("scripts/*")
 
 setup(
     name="jks-system",
-    version="1.1.15",
+    version="1.2.0",
     packages=find_packages(),  # Automatically find the packages in the project
     package_data={"jks": ["doc/*.md"]},  # script documentation, shown by jks_gui
     scripts=scripts,  # Include scripts as is

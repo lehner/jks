@@ -17,7 +17,7 @@
 #    with this program; if not, write to the Free Software Foundation, Inc.,
 #    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 #
-import stat, jks, sys, os, math, glob, tempfile, subprocess
+import stat, jks, sys, os, math, glob, tempfile, subprocess, atexit
 import numpy
 
 argv=[ x for x in sys.argv ]
@@ -74,11 +74,30 @@ cmds=cmds+"xmap(x)=x\n"
 
 
 files=[]
+written=[]  # every data file this run creates, also those of a command that fails
 fid=-1
 def NamedTemporaryFile():
     global fid
     fid+=1
-    return open("%s/data.%3.3d" % (targetDir,fid),"wt")
+    written.append("%s/data.%3.3d" % (targetDir,fid))
+    return open(written[-1],"wt")
+
+# the files of this run are removed at the end, also when a command fails (-k keeps them)
+def cleanup():
+    for fn in [ desc_name, fpdf_name, plot_name, make_name ] + written: #fps_name,
+        if os.path.exists(fn):
+            os.unlink(fn)
+    try:
+        os.rmdir(targetDir)
+    except OSError:
+        print("ERROR: %s could not be removed, it contains files of an earlier run: %s" %
+              (targetDir, ", ".join(sorted(os.listdir(targetDir)))))
+        print("ERROR: remove %s by hand" % targetDir)
+        sys.stdout.flush()
+        os._exit(1)  # in an exit handler, sys.exit would not change the exit status
+
+if keep == False:
+    atexit.register(cleanup)
 
 def create_file(tag):
     jk=jks2.get(tag)
@@ -200,9 +219,19 @@ def get_val(tag,n,fmt):
         return fmt % mn
 
 def has(tag):
-    return (tag in jks2.keys())
+    if tag not in jks2.keys():
+        print("WARNING: tag %s not found, skipped" % tag)
+        return False
+    return True
+
+# text inside a single-quoted gnuplot string: ' is written as ''
+def gq(s):
+    return s.replace("'", "''")
 
 def mktitle(tg):
+    return gq(expand(tg))
+
+def expand(tg):
     while True:
         i=tg.find("***")
         if i == -1:
@@ -290,16 +319,20 @@ for c in icmds:
     elif c[0] == "d":
         a=c[1:].split(":")
         files.append(create_file_d(a[1],a[2],a[3]))
-        cc="'%s' using (xmap($1)):2:3 w yerr lt %s lw 1 title '%s'" % (files[-1],a[0],a[4])
+        cc="'%s' using (xmap($1)):2:3 w yerr lt %s lw 1 title '%s'" % (files[-1],a[0],gq(a[4]))
         plot(cc)
     elif c[0] == "b":
         a=c[1:].split(":")
+        if not has(a[1]):
+            continue
         files.append(create_file(a[1]))
         cc="'%s' using 1:2:4 w yerr lt %s lw 1 ps 0 notitle, " % (files[-1],a[0])
         cc=cc+"'' using 1:2:3 w yerr lt %s lw 2 notitle" % (a[0])
         plot(cc)    
     elif c[0] == "f":
         a=c[1:].split(":")
+        if not has(a[1]):
+            continue
         files.append(create_fnc_file(a[1],a[2],float(a[3]),float(a[4])))
         if len(a) < 6:
             cc="'%s' using 1:($2-$3):($2+$3) w filledcu lw 1.5 lt %s notitle, " % (files[-1],a[0])
@@ -316,7 +349,7 @@ for c in icmds:
     elif c[0] == "l":
         a=c[1:].split(":")
         if len(a) == 3:
-            cc="%s lt %s title '%s'" % (a[1],a[0],a[2])
+            cc="%s lt %s title '%s'" % (a[1],a[0],gq(a[2]))
         elif len(a) == 2:
             cc="%s lt %s notitle" % (a[1],a[0])
         else:
@@ -325,7 +358,7 @@ for c in icmds:
     elif c[0] == "L":
         a=c[1:].split(":")
         if len(a) == 3:
-            cc="%s lt %s lw 2 title '%s'" % (a[1],a[0],a[2])
+            cc="%s lt %s lw 2 title '%s'" % (a[1],a[0],gq(a[2]))
         elif len(a) == 2:
             cc="%s lt %s lw 2 notitle" % (a[1],a[0])
         else:
@@ -413,12 +446,6 @@ ret=gp.communicate(input="")
 if ret[0] != b"":
     print("Error: %s" % ret[0].decode("utf-8"))
 failed=gp.returncode != 0
-
-if keep == False:
-    for fn in [ desc_name, fpdf_name, plot_name, make_name ] + files: #fps_name,
-        if os.path.exists(fn):
-            os.unlink(fn)
-    os.rmdir(targetDir)
 
 if failed:
     print("ERROR: gnuplot failed, %s is not updated" % fout)

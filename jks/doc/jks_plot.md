@@ -119,15 +119,19 @@ log scale with t >= 32 shown at negative x.  `t.pdf.input/` is kept.
 
 - A setting command anywhere on a page (also between or after its data commands)
   applies to the whole page and stays in effect for later pages.
-- `c`, `e`, `p`, `s`, `P`, `Q` silently skip commands whose tag is missing; `b` and
-  `f` stop with `KeyError` and leave `out.pdf.input/` behind.
+- A data command whose tag is missing is skipped with `WARNING: tag ... not found,
+  skipped`.
+- `out.pdf.input/` is removed at the end, also when a command fails (`-k` keeps it):
+  the files of the run one by one, then the directory.  If files of an earlier `-k`
+  run are left in it, the script prints `ERROR: ... remove out.pdf.input by hand` and
+  exits with status 1.
 - In `p`/`s`/`P`/`Q` the x coordinate is the mean of `xtag`, so `xr` refers to its
   values, not to indices.
 - `yt` without labels resets to automatic, unrotated tics.
 - `out.pdf.input/` is reused if it exists (`force` is always true; the `-f` option in
   the message is disabled).
-- Titles are enclosed in single quotes in the gnuplot script; a `'` in a title breaks
-  the script.
+- Titles and labels may contain `'` (written as `''` in the gnuplot script); a `"` in an
+  `xt`/`yt` tic label breaks the script.
 - The usage text does not mention `-k`.
 
 ## See also

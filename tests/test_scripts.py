@@ -255,6 +255,28 @@ def test_plot_settings_anywhere_and_exit_status(db, tmp_path):
     assert p.returncode == 1 and "gnuplot failed" in p.stdout
 
 
+@pytest.mark.skipif(not _have("gnuplot", "pdfcrop", "exiftool"), reason="needs gnuplot, pdfcrop and exiftool")
+def test_plot_missing_tags_and_quotes(db, tmp_path):
+    out = str(tmp_path / "q.pdf")
+    p = run("jks_plot", out, db, "c1:C:Wilson's C", "b2:nope", "f3:nope:p[0]:0:1", "l4:0.5:it's",
+            "yl:C(t) at t'")
+    assert p.stdout.count("WARNING: tag nope not found") == 2 and "Error" not in p.stdout
+    assert pages(out) == 1 and not os.path.exists(out + ".input")
+    # a failing command leaves no input directory behind
+    p = run("jks_plot", str(tmp_path / "e.pdf"), db, "c1:C:x", "f2:C:p[0]*:0:1", check=False)
+    assert p.returncode != 0 and not os.path.exists(str(tmp_path / "e.pdf.input"))
+    # files of an earlier -k run: flagged, since the directory must be removed by hand
+    k = str(tmp_path / "k.pdf")
+    run("jks_plot", k, db, "c1:C:a", "c2:C:b", "-k")
+    p = run("jks_plot", k, db, "c1:C:a", check=False)
+    assert p.returncode == 1 and "remove %s.input by hand" % k in p.stdout
+    assert sorted(os.listdir(k + ".input")) == ["data.001"]
+    if shutil.which("pdftotext"):
+        import subprocess
+        text = subprocess.run(["pdftotext", out, "-"], stdout=subprocess.PIPE, text=True).stdout
+        assert "Wilson's C" in text and "it's" in text
+
+
 def test_plot2(db, tmp_path):
     out = str(tmp_path / "p2.pdf")
     run("jks_plot2", out, db, "xr:2:20", "c1:C:C", "c2:C2:C2")
