@@ -90,7 +90,7 @@ class db_page:
             self.title = ui.label(self.file or "no database open").classes("text-sm opacity-80 grow truncate")
             self.reload_btn = ui.button(icon="refresh", on_click=lambda: self.load(True)) \
                 .props("flat dense color=white").tooltip("reload from disk")
-            ui.button(icon="add_task", on_click=lambda: self.drawer.toggle()) \
+            ui.button(icon="add_task", on_click=self.toggle_panel) \
                 .props("flat dense color=white").tooltip("new step")
             ui.button(icon="dark_mode", on_click=self.toggle_dark).props("flat dense color=white").tooltip("dark mode")
         self.drawer = ui.right_drawer(value=False).props("width=520 bordered").classes("p-3")
@@ -105,6 +105,18 @@ class db_page:
         with self.drawer:
             self.panel = step_panel(self)
         ui.timer(5.0, self.check_disk)
+
+    def toggle_panel(self):
+        self.drawer.toggle()
+        if self.drawer.value and self.panel is not None:
+            self.panel.fill_active()
+
+    def active_tag(self):
+        # the tag inspected in the current view, if the open database has it
+        v = self.view
+        if v is None or v.active is None or self.db is None or v.active not in self.db.res.set:
+            return None
+        return v.active
 
     async def pick(self):
         path = await file_picker(self.base)
@@ -149,7 +161,10 @@ class db_page:
                 ui.label("PREVIEW").classes("font-bold")
                 ui.label(m["command"]).classes("grow truncate text-xs").style(MONO)
                 panel.commit_controls()
-            self.view = database_view(child, self.dark, diff=d, ref=ref, fit_source=self.fit_source)
+            st = runner.step(m["name"], m["argv"], m["env"], m["base"])
+            fit = st.values["tail"][1] if m["name"] in ("jks_fit", "jks_slow_fit") else None
+            self.view = database_view(child, self.dark, diff=d, ref=ref, fit_source=self.fit_source,
+                                      inputs=st.spec.tags_in(st.values), fit=fit)
 
     async def after_commit(self, path):
         if self.db is not None and path == self.db.path:

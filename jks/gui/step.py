@@ -62,7 +62,28 @@ class step_panel:
                     else:
                         v[sec][i][j] = cur
                     break
+        self.fill_tag_in(spec, v)
         return v
+
+    def fill_tag_in(self, spec, v):
+        # an empty first input tag defaults to the tag being inspected (jks_fit: tag of #1)
+        tag = self.page.active_tag()
+        if tag is None:
+            return False
+        for a, x, (sec, i, j) in spec.items(v):
+            if a.kind == "tag_in":
+                if x:
+                    return False
+                if j is None:
+                    v[sec][i] = tag
+                else:
+                    v[sec][i][j] = tag
+                return True
+        return False
+
+    def fill_active(self):
+        if self.fill_tag_in(self.spec(), self.values):
+            self.render()
 
     def spec(self):
         return registry.BY_NAME[self.name]
@@ -309,8 +330,13 @@ class step_panel:
                     if d[k]:
                         ui.badge("%s %s" % (lab, ", ".join(d[k][:3]) + ("..." if len(d[k]) > 3 else "")),
                                  color="grey")
-            if d["nonfinite"]:
-                ui.label("⚠ non-finite numbers in %s" % ", ".join(d["nonfinite"][:5])).classes("text-xs text-warning")
+            bad = d["nonfinite"]
+            if m["name"] in ("jks_fit", "jks_slow_fit"):
+                # nan marks the points outside the fit range in <fit>.<tag>.input.<j>
+                fit = runner.step(m["name"], m["argv"], m["env"], m["base"]).values["tail"][1]
+                bad = [t for t in bad if not (t.startswith(fit + ".") and ".input." in t)]
+            if bad:
+                ui.label("⚠ non-finite numbers in %s" % ", ".join(bad[:5])).classes("text-xs text-warning")
             if any("ERROR" in l for l in m["log"].splitlines()):
                 ui.label("⚠ the script printed ERROR").classes("text-xs text-warning")
         self.page.show_preview(self)

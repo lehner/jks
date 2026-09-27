@@ -72,8 +72,9 @@ def _human(m, errs, etags):
 
 
 class database_view:
-    def __init__(self, db, dark, diff=None, ref=None, fit_source=None):
+    def __init__(self, db, dark, diff=None, ref=None, fit_source=None, inputs=(), fit=None):
         # diff, ref: preview of a step, compared with the database ref
+        # inputs: tags the step read; fit: fit tag the step wrote (shown in the fit overlay)
         # fit_source: fit tag -> step that wrote it (functions of the fit), or None
         self.db = db
         self.fit_source = fit_source
@@ -83,6 +84,8 @@ class database_view:
         if diff is not None:
             self.change.update((t, "new") for t in diff["added"])
             self.change.update((t, "modified") for t in diff["modified"])
+            self.change.update((t, "input") for t in inputs if t in db.res.set and t not in self.change)
+        self.new_fit = fit if fit in db.res.set else None
         self.selected = []
         self.active = None
         self.convention = "cov"  # as jks_plot2 and fits
@@ -104,7 +107,7 @@ class database_view:
                     ["(any)"] + db.variations, value="(any)", label="shifted by variation"
                 ).props("dense").classes("w-full")
                 self.var_filter.on_value_change(self.apply_filter)
-                self.only_changes = ui.checkbox("changed tags only", value=bool(self.change),
+                self.only_changes = ui.checkbox("changed and input tags only", value=bool(self.change),
                                                 on_change=self.apply_filter).props("dense")
                 self.only_changes.set_visibility(self.diff is not None)
                 self.count = ui.label().classes("text-xs opacity-70")
@@ -163,9 +166,13 @@ class database_view:
                         self.info = ui.column().classes("w-full")
                 tabs.on_value_change(self.on_tab)
         self.apply_filter()
-        if self.change:
+        if self.new_fit is not None:
+            # a fit: its data (all indices) with the fit band
+            self.fit_exp.open()
+            self.fit_sel.value = self.new_fit
+        elif self.change:
             # show what the step wrote
-            first = [t for t in self.db.keys() if t in self.change][: len(SERIES)]
+            first = [t for t in self.db.keys() if self.change.get(t) in ("new", "modified")][: len(SERIES)]
             self.table.selected = [r for r in self.table.rows if r["tag"] in first]
             self.set_selected(first)
         else:
@@ -174,6 +181,7 @@ class database_view:
     def build_fit_overlay(self):
         fits = stats.fit_tags(self.db.keys())
         with ui.expansion("fit overlay", icon="show_chart").classes("w-full").props("dense") as exp:
+            self.fit_exp = exp
             with ui.row().classes("w-full items-center gap-2"):
                 self.fit_sel = ui.select(["(none)"] + fits, value="(none)", label="fit",
                                          on_change=self.on_fit).props("dense").classes("w-40")
