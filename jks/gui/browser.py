@@ -68,9 +68,15 @@ def _human(m, errs, etags):
 
 
 class database_view:
-    def __init__(self, db, dark):
+    def __init__(self, db, dark, diff=None, ref=None):
+        # diff, ref: preview of a step, compared with the database ref
         self.db = db
         self.dark = dark
+        self.diff, self.ref = diff, ref
+        self.change = {}
+        if diff is not None:
+            self.change.update((t, "new") for t in diff["added"])
+            self.change.update((t, "modified") for t in diff["modified"])
         self.selected = []
         self.active = None
         self.convention = "cov"  # as jks_plot2 and fits
@@ -92,10 +98,14 @@ class database_view:
                     ["(any)"] + db.variations, value="(any)", label="shifted by variation"
                 ).props("dense").classes("w-full")
                 self.var_filter.on_value_change(self.apply_filter)
+                self.only_changes = ui.checkbox("changed tags only", value=bool(self.change),
+                                                on_change=self.apply_filter).props("dense")
+                self.only_changes.set_visibility(self.diff is not None)
                 self.count = ui.label().classes("text-xs opacity-70")
                 self.table = ui.table(
                     columns=[
                         {"name": "tag", "label": "tag", "field": "tag", "align": "left", "sortable": True},
+                        {"name": "change", "label": "step", "field": "change", "align": "left", "sortable": True},
                         {"name": "shape", "label": "shape", "field": "shape", "align": "right"},
                         {"name": "vars", "label": "variations", "field": "vars", "align": "left"},
                         {"name": "relerr", "label": "max rel.err", "field": "relerr", "align": "right", "sortable": True},
@@ -106,6 +116,8 @@ class database_view:
                     pagination={"rowsPerPage": 0},
                     on_select=self.on_select,
                 ).props("dense flat virtual-scroll").classes("w-full grow")
+                if self.diff is None:
+                    self.table.columns = [c for c in self.table.columns if c["name"] != "change"]
                 self.table.on("rowClick", lambda e: self.click_row(e.args[1]))
             with sp.after, ui.column().classes("w-full h-full no-wrap pl-2"):
                 with ui.row().classes("w-full items-center gap-2"):
@@ -144,6 +156,13 @@ class database_view:
                         self.info = ui.column().classes("w-full")
                 tabs.on_value_change(self.on_tab)
         self.apply_filter()
+        if self.change:
+            # show what the step wrote
+            first = [t for t in self.db.keys() if t in self.change][: len(SERIES)]
+            self.table.selected = [r for r in self.table.rows if r["tag"] in first]
+            self.set_selected(first)
+        else:
+            self.update_all()
 
     def build_overview(self):
         db = self.db
@@ -167,8 +186,9 @@ class database_view:
     def apply_filter(self):
         keys = set(stats.match(self.db.keys(), self.filter.value or ""))
         v = self.var_filter.value
-        rows = [r for r in self.db.rows() if r["tag"] in keys
-                and (v == "(any)" or v in r["vars"].split(", "))]
+        only = self.diff is not None and self.only_changes.value
+        rows = [dict(r, change=self.change.get(r["tag"], "")) for r in self.db.rows() if r["tag"] in keys
+                and (v == "(any)" or v in r["vars"].split(", ")) and (not only or r["tag"] in self.change)]
         self.table.rows = rows
         self.count.text = "%d of %d tags" % (len(rows), len(self.db.keys()))
 
@@ -217,12 +237,13 @@ class database_view:
         d.update(kw)
         return d
 
-    def stats_for(self, tag):
-        s = self.db.stats(tag, self.convention)
+    def stats_for(self, tag, db=None):
+        db = db or self.db
+        s = db.stats(tag, self.convention)
         if self.quantity == "meff":
-            jk = self.db.res.get(tag)
+            jk = db.res.get(tag)
             m, B = stats.derived(jk.orig, jk.blocks, stats.effective_mass_log)
-            s = stats.tag_stats(m, B, self.db.tags, self.convention)
+            s = stats.tag_stats(m, B, db.tags, self.convention)
         return s
 
     def on_tab(self, e):
@@ -282,11 +303,36 @@ class database_view:
                     x=x, y=y, mode="markers", legendgroup=tag, showlegend=False, hoverinfo="skip",
                     marker=dict(size=1, opacity=0, color=c),
                     error_y=dict(type="data", array=st, visible=True, thickness=0.75, width=5, color=c)))
+                if self.change.get(tag) == "modified" and self.ref is not None:
+                    self.plot_before(fig, tag, x, c)
+            if not self.selected:
+                fig.update_layout(**self.layout(
+                    xaxis=dict(visible=False), yaxis=dict(visible=False),
+                    annotations=[dict(text="select tags on the left", showarrow=False, font=dict(size=16),
+                                      xref="paper", yref="paper", x=0.5, y=0.5)]))
+                self.plot.update_figure(_figure(fig))
+                return
             ylog = self.quantity in ("abs", "relerr")
             ytitle = {"value": "value", "abs": "|value|", "meff": "m_eff", "relerr": "total error / |value|"}[self.quantity]
             fig.update_layout(**self.layout(xaxis_title="index", yaxis_title=ytitle,
                                             yaxis_type="log" if ylog else "linear"))
         self.plot.update_figure(_figure(fig))
+
+    def plot_before(self, fig, tag, x, c):
+        # the tag as it was before the step, open markers
+        s = self.stats_for(tag, self.ref)
+        y, tot, st = s.mean, s.tot_err(), s.stat_err()
+        if self.quantity == "abs":
+            y = _nz(np.abs(y))
+        name = tag + " (before)"
+        fig.add_trace(go.Scatter(
+            x=x[: len(y)], y=y, mode="markers", name=name, legendgroup=name, opacity=0.6,
+            marker=dict(size=9, color=c, symbol="circle-open"),
+            error_y=dict(type="data", array=tot, visible=True, thickness=1, width=5, color=c)))
+        fig.add_trace(go.Scatter(
+            x=x[: len(y)], y=y, mode="markers", legendgroup=name, showlegend=False, hoverinfo="skip",
+            opacity=0.6, marker=dict(size=1, opacity=0, color=c),
+            error_y=dict(type="data", array=st, visible=True, thickness=0.75, width=5, color=c)))
 
     def plot_budget(self, fig):
         if self.active is None:

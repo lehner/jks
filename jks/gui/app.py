@@ -20,11 +20,13 @@
 #
 import argparse, http.cookies, os, secrets, sys, urllib.parse
 from nicegui import app, run, ui
-from jks.gui import database
+from jks.gui import database, runner
 from jks.gui.browser import database_view
 from jks.gui.filepicker import file_picker
+from jks.gui.step import MONO, step_panel
 
 recent = []
+work_name = ".jks_work"
 
 
 class token_middleware:
@@ -62,70 +64,115 @@ def remember(path):
     recent.insert(0, path)
 
 
+def url(path):
+    return "/?" + urllib.parse.urlencode({"file": path})
+
+
+class db_page:
+    # one browser tab: the open database, its view, a step preview and the step panel
+    def __init__(self, file):
+        self.file = os.path.abspath(file) if file else ""
+        self.base = os.path.dirname(self.file) if file else os.getcwd()
+        self.work = runner.work(os.path.join(self.base, work_name))
+        self.db = None
+        self.view = None
+        self.panel = None
+        self.dark = ui.dark_mode(False)
+
+    async def build(self):
+        with ui.header().classes("items-center gap-2 py-1"):
+            ui.label("jks").classes("text-lg font-bold")
+            ui.button(icon="folder_open", on_click=self.pick).props("flat dense color=white").tooltip("open database")
+            with ui.button(icon="history").props("flat dense color=white").tooltip("recent databases"):
+                with ui.menu():
+                    for p in recent:
+                        ui.menu_item(p, on_click=lambda p=p: ui.navigate.to(url(p)))
+            self.title = ui.label(self.file or "no database open").classes("text-sm opacity-80 grow truncate")
+            self.reload_btn = ui.button(icon="refresh", on_click=lambda: self.load(True)) \
+                .props("flat dense color=white").tooltip("reload from disk")
+            ui.button(icon="add_task", on_click=lambda: self.drawer.toggle()) \
+                .props("flat dense color=white").tooltip("new step")
+            ui.button(icon="dark_mode", on_click=self.toggle_dark).props("flat dense color=white").tooltip("dark mode")
+        self.drawer = ui.right_drawer(value=False).props("width=520 bordered").classes("p-3")
+        self.body = ui.column().classes("w-full")
+        if not self.file:
+            self.reload_btn.disable()
+            with self.body:
+                ui.label("Open a database with the folder button, or start jks_gui with file names. "
+                         "Steps that create a new database can be run from the step panel.").classes("m-8")
+        else:
+            await self.load()
+        with self.drawer:
+            self.panel = step_panel(self)
+        ui.timer(5.0, self.check_disk)
+
+    async def pick(self):
+        path = await file_picker(self.base)
+        if path:
+            ui.navigate.to(url(path))
+
+    def toggle_dark(self):
+        self.dark.value = not self.dark.value
+        if self.view is not None:
+            self.view.refresh_theme()
+
+    async def load(self, force=False):
+        self.body.clear()
+        with self.body, ui.row().classes("m-8 items-center"):
+            ui.spinner(size="lg")
+            ui.label("loading %s ..." % self.file)
+        try:
+            self.db = await run.io_bound(database.load, self.file, force)
+        except Exception as e:
+            self.body.clear()
+            with self.body:
+                ui.label("ERROR: cannot read %s: %s" % (self.file, e)).classes("m-8 text-negative")
+            return
+        remember(self.db.path)
+        self.title.text = self.file
+        self.reload_btn.props("color=white")
+        self.show_current()
+
+    def show_current(self):
+        self.body.clear()
+        if self.db is None:
+            return
+        with self.body:
+            self.view = database_view(self.db, self.dark)
+
+    def show_preview(self, panel):
+        m, d, child, ref = panel.result
+        self.body.clear()
+        with self.body:
+            with ui.row().classes("w-full items-center gap-2 px-3 py-1 bg-amber-100 dark:bg-amber-900 rounded"):
+                ui.icon("visibility")
+                ui.label("PREVIEW").classes("font-bold")
+                ui.label(m["command"]).classes("grow truncate text-xs").style(MONO)
+                panel.commit_controls()
+            self.view = database_view(child, self.dark, diff=d, ref=ref)
+
+    async def after_commit(self, path):
+        if self.db is not None and path == self.db.path:
+            await self.load(True)
+        else:
+            remember(path)
+            self.show_current()
+            with self.body, ui.dialog() as dlg, ui.card():
+                ui.label("saved %s" % path)
+                with ui.row():
+                    ui.button("Open it", on_click=lambda: ui.navigate.to(url(path)))
+                    ui.button("Stay", on_click=dlg.close).props("flat")
+            dlg.open()
+
+    def check_disk(self):
+        if self.db is not None and self.db.changed_on_disk():
+            self.reload_btn.props("color=warning")
+            self.title.text = self.file + "  (changed on disk)"
+
+
 @ui.page("/")
 async def index(file: str = ""):
-    dark = ui.dark_mode(False)
-    view = {"v": None}
-
-    def toggle_dark():
-        dark.value = not dark.value
-        if view["v"] is not None:
-            view["v"].refresh_theme()
-
-    async def pick():
-        start = os.path.dirname(file) if file else os.getcwd()
-        path = await file_picker(start)
-        if path:
-            ui.navigate.to("/?" + urllib.parse.urlencode({"file": path}))
-
-    with ui.header().classes("items-center gap-2 py-1"):
-        ui.label("jks").classes("text-lg font-bold")
-        ui.button(icon="folder_open", on_click=pick).props("flat dense color=white").tooltip("open database")
-        with ui.button(icon="history").props("flat dense color=white").tooltip("recent databases"):
-            with ui.menu():
-                for p in recent:
-                    ui.menu_item(p, on_click=lambda p=p: ui.navigate.to("/?" + urllib.parse.urlencode({"file": p})))
-        title = ui.label(file or "no database open").classes("text-sm opacity-80 grow truncate")
-        reload_btn = ui.button(icon="refresh").props("flat dense color=white").tooltip("reload from disk")
-        ui.button(icon="dark_mode", on_click=toggle_dark).props("flat dense color=white").tooltip("dark mode")
-
-    body = ui.column().classes("w-full")
-    if not file:
-        with body:
-            ui.label("Open a database with the folder button, or start jks_gui with file names.").classes("m-8")
-        reload_btn.disable()
-        return
-
-    async def show(force=False):
-        body.clear()
-        with body:
-            with ui.row().classes("m-8 items-center"):
-                ui.spinner(size="lg")
-                ui.label("loading %s ..." % file)
-        try:
-            db = await run.io_bound(database.load, file, force)
-        except Exception as e:
-            body.clear()
-            with body:
-                ui.label("ERROR: cannot read %s: %s" % (file, e)).classes("m-8 text-negative")
-            return
-        remember(db.path)
-        title.text = file
-        reload_btn.props("color=white")
-        body.clear()
-        with body:
-            view["v"] = database_view(db, dark)
-
-    reload_btn.on_click(lambda: show(True))
-    await show()
-
-    def check_disk():
-        v = view["v"]
-        if v is not None and v.db.changed_on_disk():
-            reload_btn.props("color=warning")
-            title.text = file + "  (changed on disk)"
-
-    ui.timer(5.0, check_disk)
+    await db_page(file).build()
 
 
 def main(argv=None):
@@ -136,7 +183,11 @@ def main(argv=None):
     p.add_argument("--no-token", action="store_true", help="do not require an access token")
     p.add_argument("--native", action="store_true", help="open in a desktop window (needs pywebview)")
     p.add_argument("--browser", action="store_true", help="open a browser even over ssh")
+    p.add_argument("--work", default=".jks_work",
+                   help="work directory for step results, relative to each database (default: .jks_work)")
     a = p.parse_args(argv)
+    global work_name
+    work_name = a.work
 
     for f in reversed(a.files):
         if not os.path.isfile(f):

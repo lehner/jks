@@ -136,9 +136,24 @@ jks/gui/database.py    read-only database view, cached per path, reload on mtime
 jks/gui/browser.py     database_view component (tag table, plots, table, correlation,
                        configuration z-scores, info); meant to become the node inspector
 jks/gui/filepicker.py  picker for the host's filesystem
+jks/gui/registry.py    signatures of the jks_* scripts (argv = head + repeat*k + tail +
+                       optional[:j], typed roles, env vars); parse/build round-trips argv
+jks/gui/runner.py      runs one step on a copy in the work directory, content-hash cache,
+                       diff of two databases, commit with hard-link backup and history.sh
+jks/gui/step.py        step panel: form from the registry, pasted commands, preview, commit
 jks/gui/app.py         page, command line, access-token middleware
 scripts/jks_gui        launcher
 ```
+
+- A script that is not in `registry.SCRIPTS` cannot be run from the GUI; add an entry
+  when adding a script.  Deprecated (python 2, `jks_op`) scripts are left out.
+- Steps run as `sys.executable script argv` with cwd = the database's directory, the
+  written database replaced by a copy in `.jks_work/tmp/`, and an environment without any
+  `JKS_*` variable except the step's own.  Results are bit-identical to the same command
+  run by hand (tested for jks_add, jks_plsa with and without JKS_CORRELATION_STRENGTH,
+  jks_rescale_variance, jks_rm, jks_take).
+- Cache key: script file hash, argv with the output database as a placeholder, env,
+  content hash of every database read, size/mtime of glob-matched files.
 
 - On this host the GUI dependencies live in `~/.venvs/jks-gui` (system python has no pip):
   `PYTHONPATH=~/jks_system_src/jks_system-1.1.0 ~/.venvs/jks-gui/bin/python scripts/jks_gui db.jks`.
