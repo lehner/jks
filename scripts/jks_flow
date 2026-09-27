@@ -36,12 +36,13 @@ usage = """%s command flow.sh [...]
   rm flow.sh id                      remove a node nobody reads
   rebase flow.sh id parent           let node id (and all after it) start from another node
   fmt flow.sh                        rewrite the file in canonical form
+  du flow.sh                         disk usage of the work directory and of every node
   gc flow.sh [-n]                    delete stored results no node needs (-n: only report)
 
 The flow file is a bash script; "bash flow.sh" replays it without the cache.  Loops
 (jks_begin/for/jks_apply/done) are written into the file directly.""" % sys.argv[0]
 
-if len(sys.argv) < 3 or sys.argv[1] not in ("status", "run", "export", "log", "source", "list", "plot", "add", "rm", "rebase", "fmt", "gc"):
+if len(sys.argv) < 3 or sys.argv[1] not in ("status", "run", "export", "log", "source", "list", "plot", "add", "rm", "rebase", "fmt", "du", "gc"):
     print(usage)
     sys.exit(0)
 
@@ -189,10 +190,30 @@ try:
     elif cmd == "fmt":
         fl.save()
 
+    elif cmd == "du":
+        u = en.usage()
+        what = {"delta": "delta", "full": "full copy", "plot": "figure", "snapshot": "snapshot of the source"}
+        for id, x in u["nodes"].items():
+            c, b = x.get("current"), x.get("built")
+            line = "%-16s %9s" % (id, size(c["bytes"] + c["iterations"]) if c else "-")
+            if c:
+                line += "  %s" % what.get(c["stored"], c["stored"])
+                if c["stored"] == "delta" and c["changed"]:
+                    line += " of %d tags" % c["changed"]
+                if c["iterations"]:
+                    line += ", %s in iterations" % size(c["iterations"])
+            if b:
+                line += "  (previous result %s)" % size(b["bytes"] + b["iterations"])
+            print(line)
+        print("")
+        print("%s in %s: %s" % (size(u["total"]), u["work"], ", ".join(
+            "%s %s" % (size(u["parts"][k]), k) for k in ("store", "tmp", "files", "other") if u["parts"][k])))
+        print("jks_flow gc would free %s (%d stored results)" % (size(u["free"]), u["free_count"]))
+
     elif cmd == "gc":
         dry = "-n" in args
-        n = en.gc(dry=dry)
-        print("%s %s" % ("would free" if dry else "freed", size(n)))
+        n, count = en.gc(dry=dry)
+        print("%s %s (%d stored results)" % ("would free" if dry else "freed", size(n), count))
 
 except flow.FlowError as e:
     fail(e)

@@ -15,6 +15,7 @@ Run, inspect and edit a data flow: a bash file of `jks_*` steps whose results ar
     jks_flow rm flow.sh id
     jks_flow rebase flow.sh id parent
     jks_flow fmt flow.sh
+    jks_flow du flow.sh
     jks_flow gc flow.sh [-n]
 
 ## Description
@@ -80,7 +81,8 @@ only add tags run independently ("map"), others one after the other ("sequence")
 | `rm id` | remove a node that no other node reads |
 | `rebase id parent` | let a step or loop (and everything after it) start from another node |
 | `fmt` | rewrite the file in canonical form |
-| `gc [-n]` | delete stored results no current or last computed node needs (`-n`: only report) |
+| `du` | disk usage: per node its stored result (delta, full copy, snapshot of a source or figure; loops with their iterations) and its previous result, the work directory by part, and what `gc` would free |
+| `gc [-n]` | delete stored results no current or last computed node needs, and temporary files of killed runs (`-n`: only report) |
 
 ## Environment
 
@@ -112,7 +114,12 @@ flow without the cache into `ana.work/files/`.
 - Comments before a node are kept when the file is rewritten; comments inside loop
   bodies are not.
 - Several jks_gui and jks_flow processes may use the same flow; the last writer of the
-  file wins.
+  file wins.  Do not run `gc` while another process computes the flow.
+- A node's previous result (of the last run before an edit) is kept until the node is
+  computed again, so the GUI can still show it; `gc` removes older ones, results of
+  discarded previews and of removed nodes.  Snapshots of sources are copies made with
+  `cp --reflink=auto` (`cp -c` on macOS): on copy-on-write file systems they share the
+  source's blocks, so `du` overstates their disk use.
 
 ## See also
 

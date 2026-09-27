@@ -664,6 +664,20 @@ class flow:
 
 
 # ---- database files without resamples.save (no os.getlogin, keeps origin) ----
+def _du(path):
+    # bytes of the files below path
+    if os.path.isfile(path):
+        return os.path.getsize(path)
+    total = 0
+    for d, _, files in os.walk(path):
+        for f in files:
+            try:
+                total += os.lstat(os.path.join(d, f)).st_size
+            except OSError:
+                pass
+    return total
+
+
 def _write(res, path, origin=None):
     s = {"N": res.N, "set": {}, "_clone_type_str": res._clone_type_str, "tags": res.tags,
          "info": res.info, "origin": origin if origin is not None else (res.origin or {})}
@@ -1316,9 +1330,62 @@ class engine:
         self._remember(key, child)
         return {"stored": stored, "bytes": m["bytes"]}
 
+    # ---- disk usage ----
+    def stored_bytes(self, key):
+        # size of a stored result (its file and metadata), 0 if there is none
+        m = self.meta(key) if key and key[0] != "l" else None
+        if m is None:
+            return 0
+        return sum(os.path.getsize(f) for f in (os.path.join(self.store, m["file"]),
+                                                  os.path.join(self.store, key + ".json")) if os.path.exists(f))
+
+    def usage(self):
+        # bytes on disk: per node its current and its last built result (loops with their
+        # iterations), the work directory by part, and what gc would free
+        keys, state = self.keys(), self._read_json("state.json")
+        built = state.get("built", {})
+        nodes = {}
+        for n in self.flow.nodes.values():
+            r = {}
+            for what, k in (("current", keys.get(n.id)), ("built", built.get(n.id))):
+                if not k or (what == "built" and k == keys.get(n.id)):
+                    continue
+                m = self.meta(k)
+                if m is None:
+                    continue
+                its = [x for x in m.get("iterations", []) if x != k]
+                stored = "snapshot" if k[0] == "s" else m.get("stored", "")
+                r[what] = {"key": k, "stored": stored, "bytes": self.stored_bytes(k),
+                           "iterations": sum(self.stored_bytes(x) for x in its), "changed": len(m.get("changed", []))}
+            nodes[n.id] = r
+        parts = {}
+        for part in ("store", "tmp", "files"):
+            parts[part] = _du(os.path.join(self.work, part))
+        parts["other"] = _du(self.work) - sum(parts.values())
+        free, count = self.gc(dry=True)
+        return {"work": self.work, "nodes": nodes, "parts": parts, "total": sum(parts.values()),
+                "free": free, "free_count": count}
+
+    def stale_tmp(self):
+        # temporary directories of processes that are gone (a run that was killed)
+        out = []
+        for p in glob.glob(os.path.join(self.work, "tmp", "*-*")):
+            try:
+                pid = int(p.rsplit("-", 1)[1])
+            except ValueError:
+                continue
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                out.append(p)
+            except OSError:
+                pass
+        return out
+
     def gc(self, dry=False):
         # remove stored results that no current or last built node needs (loop iterations
-        # of those nodes are kept so that editing one value recomputes one iteration)
+        # of those nodes are kept so that editing one value recomputes one iteration), and
+        # temporary files of runs that were killed -> (bytes, number of results)
         keys, state = self.keys(), self._read_json("state.json")
         keep, todo = set(), [k for k in list(keys.values()) + list(state.get("built", {}).values()) if k]
         while todo:
@@ -1331,14 +1398,19 @@ class engine:
                 if m.get("stored") == "delta":
                     todo.append(m["base"])
                 todo += m.get("iterations", [])
-        removed = 0
+        removed, count = 0, 0
         for p in glob.glob(os.path.join(self.store, "*.json")):
             k = os.path.basename(p)[:-5]
             if k not in keep:
                 m = self.meta(k)
+                count += 1
                 for f in [p] + ([os.path.join(self.store, m["file"])] if m else []):
                     if os.path.exists(f):
                         removed += os.path.getsize(f)
                         if not dry:
                             os.remove(f)
-        return removed
+        for p in self.stale_tmp():
+            removed += _du(p)
+            if not dry:
+                shutil.rmtree(p, ignore_errors=True)
+        return removed, count

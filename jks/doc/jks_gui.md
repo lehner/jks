@@ -23,7 +23,10 @@ A **flow** (`.sh`, see `jks_flow`) opens as a graph of database states.  Selecti
 node shows its database; the step panel adds steps and loops after it or edits a
 node (everything after an edited node is recomputed); the plot panel makes
 `jks_plot2` figures; rebase lets a node start from another one.  Changed input files
-make nodes stale; "Run stale" computes them.
+make nodes stale; "Run stale" computes them.  The storage button in the header shows
+the disk usage of the flow's work directory; its dialog lists every node's stored
+result and cleans up results no node needs (as `jks_flow gc`).  The selected node's
+toolbar shows the size of its result.
 
 ## Arguments
 

@@ -39,6 +39,26 @@ STATUS = {  # color, text; status colors are reserved for states and always come
     "missing": ("#ec835a", "input missing"), "new": ("#8f8d86", "not computed"),
     "running": ("#2a78d6", "running"),
 }
+
+
+def size(n):
+    for u in ["B", "KB", "MB", "GB"]:
+        if n < 1024 or u == "GB":
+            return "%.0f %s" % (n, u) if u == "B" else "%.1f %s" % (n, u)
+        n /= 1024.0
+
+
+def stored_text(u):
+    # "31.2 KB delta (2 tags) + 44 KB iterations" for one stored result of usage()
+    t = "%s %s" % (size(u["bytes"]), {"delta": "delta", "full": "full copy", "plot": "figure",
+                                    "snapshot": "snapshot of the source"}.get(u["stored"], u["stored"]))
+    if u["stored"] == "delta" and u["changed"]:
+        t += " (%d tag%s)" % (u["changed"], "s" if u["changed"] != 1 else "")
+    if u["iterations"]:
+        t += " + %s iterations" % size(u["iterations"])
+    return t
+
+
 SYMBOL = {"source": "rect", "list": "diamond", "step": "circle", "loop": "roundRect", "plot": "triangle"}
 
 
@@ -478,6 +498,7 @@ class flow_page:
         self.selected = None
         self.states = {}  # id -> running/ok/failed during a run
         self.status = {}
+        self.usage = None  # engine.usage(), refreshed when the states change
         self.dbs = {}  # key -> database (a few)
         self.q = queue.Queue()
         self.busy = False
@@ -586,6 +607,8 @@ class flow_page:
             ui.button(icon="folder_open", on_click=self.pick).props("flat dense color=white").tooltip("open a database or flow")
             ui.label(self.file).classes("text-sm opacity-80 grow truncate")
             self.summary = ui.label().classes("text-sm")
+            self.disk_btn = ui.button(icon="storage", on_click=self.show_usage) \
+                .props("flat dense no-caps color=white").tooltip("disk usage of the flow; clean up")
             self.run_btn = ui.button("Run stale", icon="play_arrow", on_click=self.run_stale) \
                 .props("flat dense color=white").tooltip("compute every node that is not up to date")
             self.stop_btn = ui.button(icon="stop", on_click=self.stop).props("flat dense color=white").tooltip("stop")
@@ -631,9 +654,20 @@ class flow_page:
             ui.navigate.to("/?file=" + path)
 
     # ---- graph ----
-    async def refresh(self):
+    async def refresh(self, usage=False):
+        old = dict((i, (r["status"], r["key"])) for i, r in self.status.items())
         self.status = dict((r["id"], r) for r in await run.io_bound(self.en.status))
+        if usage or self.usage is None or old != dict((i, (r["status"], r["key"])) for i, r in self.status.items()):
+            await self.update_usage()
         self.draw()
+
+    async def update_usage(self):
+        try:
+            self.usage = await run.io_bound(self.en.usage)
+        except Exception as e:  # never break the page over a size
+            self.usage = None
+            print("disk usage: %s" % e, flush=True)
+        self.disk_btn.text = size(self.usage["total"]) if self.usage else ""
 
     def draw(self):
         pos = layout(self.fl)
@@ -651,6 +685,9 @@ class flow_page:
                                         desc.replace("<", "&lt;")[:300])
             if n.kind == "loop" and info.get("detail"):
                 tip += "<br>" + info["detail"]
+            u = (self.usage or {}).get("nodes", {}).get(i, {})
+            if u.get("current"):
+                tip += "<br>stored: " + stored_text(u["current"])
             sel = i == self.selected
             data.append({"name": i, "x": pos[i][0], "y": pos[i][1], "symbol": SYMBOL[n.kind],
                          "symbolSize": 22 if n.kind != "list" else 18, "value": word,
@@ -782,6 +819,12 @@ class flow_page:
                 .style("background-color: %s !important; color: #111" % color)
             if info.get("detail"):
                 ui.label(info["detail"]).classes("text-xs opacity-70")
+            u = (self.usage or {}).get("nodes", {}).get(id, {})
+            if u:
+                t = stored_text(u["current"]) if u.get("current") else "no stored result"
+                if u.get("built"):
+                    t += "; previous result " + size(u["built"]["bytes"] + u["built"]["iterations"])
+                ui.label(t).classes("text-xs opacity-70").tooltip("disk space of this node in the work directory")
             ui.space()
             if n.has_db():
                 ui.button("Add step", icon="add", on_click=self.start_add).props("flat dense")
@@ -1148,7 +1191,8 @@ class flow_page:
     def confirm_remove(self, id):
         with ui.dialog() as dlg, ui.card():
             ui.label("Remove node %s from the flow?" % id).classes("font-bold")
-            ui.label("Its stored result stays in the work directory until jks_flow gc.").classes("text-xs opacity-70")
+            ui.label("Its stored result stays in the work directory until it is cleaned up (disk usage).") \
+                .classes("text-xs opacity-70")
 
             async def go():
                 dlg.close()
@@ -1159,6 +1203,64 @@ class flow_page:
             with ui.row():
                 ui.button("Remove", on_click=go).props("color=negative")
                 ui.button("Cancel", on_click=dlg.close).props("flat")
+        dlg.open()
+
+    async def show_usage(self):
+        await self.update_usage()
+        u = self.usage
+        if u is None:
+            self.notify("the disk usage could not be determined", type="warning")
+            return
+        with ui.dialog() as dlg, ui.card().classes("w-[48rem] max-w-full"):
+            ui.label("Disk usage: %s" % size(u["total"])).classes("text-lg font-bold")
+            ui.label(u["work"]).classes("text-xs opacity-70").style(MONO)
+            parts = [("store", "stored results"), ("tmp", "temporary files of runs"),
+                     ("files", "output of bash replay (not cleaned up)"), ("other", "state and hashes")]
+            with ui.row().classes("gap-4 text-sm"):
+                for k, what in parts:
+                    if u["parts"][k]:
+                        ui.label("%s %s" % (size(u["parts"][k]), what))
+            rows = []
+            for i, n in self.fl.nodes.items():
+                x = u["nodes"].get(i, {})
+                c, b = x.get("current"), x.get("built")
+                rows.append({"id": i, "kind": n.kind, "stored": stored_text(c) if c else "",
+                             "total": (c["bytes"] + c["iterations"]) if c else 0,
+                             "size": size(c["bytes"] + c["iterations"]) if c else "",
+                             "previous": size(b["bytes"] + b["iterations"]) if b else ""})
+            ui.table(columns=[
+                {"name": "id", "label": "node", "field": "id", "align": "left", "sortable": True},
+                {"name": "kind", "label": "kind", "field": "kind", "align": "left"},
+                {"name": "total", "label": "size", "field": "total", "align": "right", "sortable": True,
+                 ":format": "(v, row) => row.size"},
+                {"name": "stored", "label": "stored as", "field": "stored", "align": "left"},
+                {"name": "previous", "label": "previous result", "field": "previous", "align": "right"},
+            ], rows=rows, row_key="id", pagination={"rowsPerPage": 0}) \
+                .props("dense flat virtual-scroll").classes("w-full max-h-[50vh]")
+            ui.label("Iterations of loops are kept so that editing one value recomputes one iteration; "
+                     "the previous result of a node is kept until the node is computed again.") \
+                .classes("text-xs opacity-70")
+
+            async def clean():
+                dlg.close()
+                freed, count = await run.io_bound(self.en.gc)
+                self.notify("freed %s (%d stored results)" % (size(freed), count))
+                await self.refresh(usage=True)
+                self.show_toolbar()
+            with ui.row().classes("w-full items-center"):
+                if u["free"]:
+                    b = ui.button("Clean up: delete %d unused results (%s)" % (u["free_count"], size(u["free"])),
+                                  icon="delete_sweep", on_click=clean).props("color=negative")
+                    if self.busy or (self.panel is not None and self.panel.result is not None):
+                        b.disable()
+                        ui.label("not while a run or a preview is open").classes("text-xs opacity-70")
+                    else:
+                        b.tooltip("results no node needs now or as its previous result: old definitions, "
+                                  "discarded previews, removed nodes; and files of killed runs")
+                else:
+                    ui.label("Nothing to clean up.").classes("text-sm")
+                ui.space()
+                ui.button("Close", on_click=dlg.close).props("flat")
         dlg.open()
 
     def unique(self, base):

@@ -161,7 +161,7 @@ jks/gui/flowview.py    flow page: graph (ECharts, layered layout), node inspecto
                        (database_view of the node), flow_target for the step panel
 jks/gui/app.py         page, command line, access-token middleware
 scripts/jks_gui        launcher
-scripts/jks_flow       command line for flows (status, run, export, log, add, rm, fmt, gc)
+scripts/jks_flow       command line for flows (status, run, export, log, add, rm, fmt, du, gc)
 ```
 
 ### Flows (`jks_flow`)
@@ -216,6 +216,13 @@ scripts/jks_flow       command line for flows (status, run, export, log, add, rm
   to `bash flow.sh` for every node (lqcd example incl. plsa/blsa/fit/take and a
   JKS_CORRELATION_STRENGTH branch).  180 MB database, 6 steps: 173 MB store.
 - Files are written with `flow._write` (resamples format, no `os.getlogin`).
+- Disk usage (`engine.usage`, `jks_flow du`, the storage button in the GUI header): per
+  node the stored result of its current key and of its last built key (loops with their
+  iteration results), the work directory by part (store, tmp, files, other) and what
+  `gc` would free.  `gc` keeps everything reachable from current and last built keys
+  (delta bases, loop iterations) and removes the rest plus `tmp/<name>-<pid>` of dead
+  processes; it returns (bytes, number of results).  The GUI disables it during runs
+  and open previews (a preview's result is not in the flow yet).
 
 - A script that is not in `registry.SCRIPTS` cannot be run from the GUI; add an entry
   when adding a script.  Deprecated (python 2, `jks_op`) scripts are left out.
