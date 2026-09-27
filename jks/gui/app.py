@@ -353,6 +353,23 @@ def main(argv=None):
     if "SSH_CONNECTION" in os.environ:
         print("jks_gui: from your workstation: ssh -L %d:localhost:%d %s" % (a.port, a.port, os.uname().nodename), flush=True)
     local_display = sys.platform == "darwin" or "DISPLAY" in os.environ or "WAYLAND_DISPLAY" in os.environ
-    show = url if (a.browser or (local_display and "SSH_CONNECTION" not in os.environ)) else False
-    ui.run(host=a.host, port=a.port, title="jks", reload=False, show=show, native=a.native,
+    if not a.native and (a.browser or (local_display and "SSH_CONNECTION" not in os.environ)):
+        open_browser(url, a.host, a.port)
+    ui.run(host=a.host, port=a.port, title="jks", reload=False, show=False, native=a.native,
            show_welcome_message=False, favicon="📊")
+
+
+def open_browser(url, host, port):
+    # the printed URL (with its token) once the server answers; nicegui's show= takes only a
+    # path and puts its own address in front of it
+    import socket, threading, time, webbrowser
+
+    def wait():
+        for _ in range(600):
+            try:
+                socket.create_connection(("127.0.0.1" if host in ("0.0.0.0", "") else host, port), 0.5).close()
+                webbrowser.open(url)
+                return
+            except OSError:
+                time.sleep(0.1)
+    threading.Thread(target=wait, daemon=True).start()

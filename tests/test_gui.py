@@ -35,15 +35,16 @@ def free_port():
 
 class gui:
     # jks_gui on a free port -> .url (with the token unless no_token)
-    def __init__(self, target, cwd, no_token=True):
+    def __init__(self, target, cwd, no_token=True, extra=(), extra_env=None):
         self.port = free_port()
         args = [sys.executable, os.path.join(SCRIPTS, "jks_gui"), "--port", str(self.port),
-                "--history", os.path.join(cwd, "history.json"), target]
+                "--history", os.path.join(cwd, "history.json")] + list(extra) + [target]
         if no_token:
             args.insert(2, "--no-token")
         self.log = open(os.path.join(cwd, "gui.log"), "w+")
         # without pytest's variables: nicegui would start in its own test mode
         e = dict((k, v) for k, v in env().items() if not k.startswith("PYTEST_"))
+        e.update(extra_env or {})
         self.p = subprocess.Popen(args, cwd=cwd, env=e, stdout=self.log, stderr=subprocess.STDOUT)
         self.url = None
         for _ in range(300):
@@ -114,6 +115,24 @@ def test_token_required(db, tmp_path):
         browser = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
         assert browser.open(g.url, timeout=5).status == 200
         assert browser.open(g.url.split("?")[0], timeout=5).status == 200  # same host as the cookie
+    finally:
+        g.stop()
+
+
+def test_browser_gets_the_printed_url(db, tmp_path):
+    # --browser (and a local display on macOS) opens exactly the URL with the token
+    opened = str(tmp_path / "opened.txt")
+    fake = str(tmp_path / "browser.sh")
+    with open(fake, "w") as f:
+        f.write('#!/bin/sh\necho "$1" >> %s\n' % opened)
+    os.chmod(fake, 0o755)
+    g = gui(db, str(tmp_path), no_token=False, extra=["--browser"], extra_env={"BROWSER": fake})
+    try:
+        for _ in range(100):
+            if os.path.exists(opened):
+                break
+            time.sleep(0.1)
+        assert open(opened).read().split() == [g.url]
     finally:
         g.stop()
 
