@@ -147,6 +147,8 @@ jks/gui/history.py     recently used field values (20 per "script:argument", "en
                        "command"), ~/.config/jks_gui/history.json, merged on every save
 jks/flow/core.py       flows: DAG of steps in a bash file (parse/write), engine with keys,
                        status, delta store, parallel runs, export, gc (no GUI imports)
+jks/gui/flowview.py    flow page: graph (ECharts, layered layout), node inspector
+                       (database_view of the node), flow_target for the step panel
 jks/gui/app.py         page, command line, access-token middleware
 scripts/jks_gui        launcher
 scripts/jks_flow       command line for flows (status, run, export, log, add, rm, fmt, gc)
@@ -197,6 +199,16 @@ scripts/jks_flow       command line for flows (status, run, export, log, add, rm
   `JKS_*` variable except the step's own.  Results are bit-identical to the same command
   run by hand (tested for jks_add, jks_plsa with and without JKS_CORRELATION_STRENGTH,
   jks_rescale_variance, jks_rm, jks_take).
+- Flow page (`jks_gui flow.sh`, or "new flow from this database" on a database page): the
+  step panel adds a node after the selected one (preview first: the candidate flow is
+  run in the work directory, then "Add ... to the flow" saves the file) or edits a step
+  node (after saving, all descendants are recomputed).  Changed inputs are only flagged;
+  "Run stale" computes them.  The engine runs in a worker thread with its own event loop
+  (`flow_page.engine_run`); log lines and node states come back through a queue drained
+  by a timer, so UI code never runs in the worker.  Notifications go through
+  `flow_page.notify` (the element that triggered an action may have been deleted).
+  Deleting tags in a flow proposes a `jks_rm` node.  Loops are shown and computed but
+  edited in the file for now.
 - Deleting tags from the tag panel runs `jks_rm` with `glob.escape`d names and commits
   only if the diff removes exactly the selected tags.
 - Fit overlay (`stats.fit_band`): jks_fit stores per range j the parameters, plus

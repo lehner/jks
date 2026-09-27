@@ -72,13 +72,15 @@ def _human(m, errs, etags):
 
 
 class database_view:
-    def __init__(self, db, dark, diff=None, ref=None, fit_source=None, inputs=(), fit=None, on_delete=None):
+    def __init__(self, db, dark, diff=None, ref=None, fit_source=None, inputs=(), fit=None, on_delete=None,
+                 height="calc(100vh - 5rem)"):
         # diff, ref: preview of a step, compared with the database ref
         # inputs: tags the step read; fit: fit tag the step wrote (shown in the fit overlay)
         # fit_source: fit tag -> step that wrote it (functions of the fit), or None
         self.db = db
         self.fit_source = fit_source
         self.on_delete = on_delete  # async callback(tags) removing tags from the database
+        self.height = height
         self.dark = dark
         self.diff, self.ref = diff, ref
         self.change = {}
@@ -98,7 +100,7 @@ class database_view:
     # ---- layout ----
     def build(self):
         db = self.db
-        with ui.splitter(value=28, limits=(15, 60)).classes("w-full h-[calc(100vh-5rem)]") as sp:
+        with ui.splitter(value=28, limits=(15, 60)).classes("w-full").style("height: %s" % self.height) as sp:
             with sp.before, ui.column().classes("w-full h-full no-wrap gap-1 pr-2"):
                 self.build_overview()
                 with ui.row().classes("w-full items-center no-wrap gap-1"):
@@ -133,7 +135,7 @@ class database_view:
                 if self.diff is None:
                     self.table.columns = [c for c in self.table.columns if c["name"] != "change"]
                 self.table.on("rowClick", lambda e: self.click_row(e.args[1]))
-            with sp.after, ui.column().classes("w-full h-full no-wrap pl-2"):
+            with sp.after, ui.column().classes("w-full h-full no-wrap pl-2 overflow-auto"):
                 with ui.row().classes("w-full items-center gap-2"):
                     self.active_sel = ui.select([], label="active tag").props("dense").classes("w-56")
                     self.active_sel.on_value_change(self.on_active)
@@ -154,19 +156,19 @@ class database_view:
                             ui.label("error bars as jks_plot2: inner statistical, outer stat and sys in quadrature"
                                      ).classes("text-xs opacity-70")
                         self.build_fit_overlay()
-                        self.plot = ui.plotly(go.Figure()).classes("w-full h-[65vh]")
+                        self.plot = ui.plotly(go.Figure()).classes("w-full").style("height: calc(%s - 14rem)" % self.height)
                     with ui.tab_panel(t_table):
                         self.values = ui.table(columns=[], rows=[], row_key="t", pagination={"rowsPerPage": 0}) \
-                            .props("dense flat virtual-scroll").classes("w-full h-[70vh]")
+                            .props("dense flat virtual-scroll").classes("w-full").style("height: calc(%s - 10rem)" % self.height)
                     with ui.tab_panel(t_cor):
                         self.cor_which = ui.select(CORRELATIONS, value="total", label="covariance",
                                                    on_change=self.update_cor).props("dense").classes("w-56")
-                        self.cor = ui.plotly(go.Figure()).classes("w-full h-[65vh]")
+                        self.cor = ui.plotly(go.Figure()).classes("w-full").style("height: calc(%s - 14rem)" % self.height)
                     with ui.tab_panel(t_out):
                         ui.label("z-score of each configuration's pseudo-value, "
                                  "z = (N-1)(<b> - b_i) / s with s the single-configuration standard deviation"
                                  ).classes("text-xs opacity-70")
-                        self.outliers = ui.plotly(go.Figure()).classes("w-full h-[65vh]")
+                        self.outliers = ui.plotly(go.Figure()).classes("w-full").style("height: calc(%s - 14rem)" % self.height)
                     with ui.tab_panel(t_info):
                         self.info = ui.column().classes("w-full")
                 tabs.on_value_change(self.on_tab)

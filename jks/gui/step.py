@@ -17,7 +17,9 @@
 #    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 #
 # Step panel: compose one jks_* command from its signature (or paste one),
-# preview its result on a copy, then commit or discard it.
+# preview its result on a copy, then commit or discard it.  What the step
+# applies to is a target: db_target (a database file, below) or a flow node
+# (flowview.flow_target); the panel only talks to its target.
 #
 import os
 from nicegui import run, ui
@@ -29,9 +31,113 @@ from jks.gui.filepicker import file_picker
 MONO = "font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8rem"
 
 
-class step_panel:
+def preview_view(r, dark, fit_source, controls, height="calc(100vh - 8rem)", title="PREVIEW"):
+    # banner with the command and the commit buttons, then the result with its diff
+    from jks.gui.browser import database_view
+    with ui.row().classes("w-full items-center gap-2 px-3 py-1 bg-amber-100 dark:bg-amber-900 rounded"):
+        ui.icon("visibility")
+        ui.label(title).classes("font-bold")
+        ui.label(r["command"]).classes("grow truncate text-xs").style(MONO)
+        controls()
+    spec = registry.BY_NAME[r["name"]]
+    v = spec.parse(r["argv"])
+    fit = v["tail"][1] if r["name"] in ("jks_fit", "jks_slow_fit") else None
+    return database_view(r["child"], dark, diff=r["diff"], ref=r["ref"], fit_source=fit_source,
+                         inputs=spec.tags_in(v), fit=fit, height=height)
+
+
+def rel(base, p):
+    # paths below base as the user would type them there
+    p = os.path.abspath(p)
+    r = os.path.relpath(p, base)
+    return p if r.startswith("..") else r
+
+
+class db_target:
+    # steps on the database file open in a db_page: preview in the work directory,
+    # commit replaces the file (or saves a new one)
     def __init__(self, page):
         self.page = page
+
+    @property
+    def db(self):
+        return self.page.db
+
+    def where(self):
+        return "work directory: %s" % self.page.work.root
+
+    def primary_default(self, spec):
+        if spec.primary_kind() in ("db", "db_maybe"):
+            return rel(self.page.base, self.db.path) if self.db is not None else ""
+        return "new.jks"
+
+    def input_default(self):
+        return rel(self.page.base, self.db.path) if self.db is not None else ""
+
+    def inputs(self):
+        return []
+
+    def primary_label(self, x):
+        return x or "(no database open)"
+
+    def check(self, name, argv, env):
+        return runner.step(name, argv, env, self.page.base).check(self.db)
+
+    def normalize(self, spec, values):
+        if spec.primary_kind() in ("db", "db_maybe") and self.db is not None and \
+                os.path.abspath(os.path.join(self.page.base, spec.get_primary(values))) != self.db.path:
+            ui.notify("the step applies to the open database %s" % rel(self.page.base, self.db.path), type="info")
+            values = spec.set_primary(values, rel(self.page.base, self.db.path))
+        return values
+
+    def render_extra(self, panel):
+        pass
+
+    async def run(self, name, argv, env, log, procs):
+        st = runner.step(name, argv, env, self.page.base)
+        m = await self.page.work.run(st, log=log, procs=procs)
+        if not m["ok"]:
+            return m
+        child = await run.io_bound(database.load, self.page.work.node(m["key"]))
+        ref = await run.io_bound(database.load, m["reference"]) if m["reference"] else None
+        d = await run.io_bound(runner.diff, ref.res if ref else None, child.res)
+        return {"ok": True, "meta": m, "child": child, "ref": ref, "diff": d, "name": name, "argv": argv,
+                "env": env, "command": m["command"], "seconds": m["seconds"], "cached": m.get("cached"),
+                "log": m["log"]}
+
+    def show(self, panel):
+        self.page.show_preview(panel)
+
+    def commit_controls(self, panel):
+        m = panel.result["meta"]
+        if m["kind"] in ("db", "db_maybe") and self.db is not None and m["primary"] == self.db.path:
+            ui.button("Commit to %s" % os.path.basename(m["primary"]), icon="check",
+                      on_click=lambda: self.commit(panel, None)).props("color=positive")
+        else:
+            target = ui.input("save as", value=rel(self.page.base, m["primary"])).props("dense").style(MONO)
+            ui.button("Save", icon="save", on_click=lambda: self.commit(panel, target.value)).props("color=positive")
+        ui.button("Discard", icon="close", on_click=panel.discard).props("flat")
+
+    async def commit(self, panel, target):
+        m = panel.result["meta"]
+        try:
+            path = self.page.work.commit(m, target)
+        except (RuntimeError, FileExistsError) as e:
+            ui.notify(str(e), type="negative")
+            return
+        ui.notify("committed: %s" % m["command"], type="positive")
+        panel.done()
+        await self.page.after_commit(path)
+        panel.render()  # tag lists and checks against the new state
+
+    def discard(self, panel):
+        self.page.show_current()
+
+
+class step_panel:
+    def __init__(self, page, target=None):
+        self.page = page
+        self.target = target or db_target(page)
         self.name = "jks_add"
         self.env = {}
         self.values = self.defaults(self.name)
@@ -42,20 +148,13 @@ class step_panel:
 
     # ---- state ----
     def rel(self, p):
-        # paths below the base directory as the user would type them there
-        p = os.path.abspath(p)
-        r = os.path.relpath(p, self.page.base)
-        return p if r.startswith("..") else r
+        return rel(self.page.base, p)
 
     def defaults(self, name):
         spec = registry.BY_NAME[name]
-        v = spec.empty()
-        cur = self.rel(self.page.db.path) if self.page.db is not None else ""
-        kind = spec.primary_kind()
-        if kind in ("db", "db_maybe"):
-            v = spec.set_primary(v, cur)
-        else:
-            v = spec.set_primary(v, "new.jks")
+        v = spec.set_primary(spec.empty(), self.target.primary_default(spec))
+        cur = self.target.input_default()
+        if spec.primary_kind() == "db_new":
             for a, x, (sec, i, j) in spec.items(v):
                 if a.kind == "db_in":
                     if j is None:
@@ -95,8 +194,11 @@ class step_panel:
     def command(self):
         return registry.join_command(self.env, self.name, self.argv())
 
-    def current_step(self):
-        return runner.step(self.name, self.argv(), self.env, self.page.base)
+    def load_command(self, name, argv, env):
+        # fill the form from an existing command (editing a flow node)
+        self.name, self.values, self.env = name, registry.BY_NAME[name].parse(argv), dict(env)
+        self.script_sel.value = name
+        self.render()
 
     # ---- layout ----
     def build(self):
@@ -107,6 +209,7 @@ class step_panel:
                 self.script_sel = ui.select(opts, value=self.name, label="script", with_input=True,
                                             on_change=lambda e: self.set_script(e.value)).classes("grow")
             self.help = ui.label().classes("text-xs opacity-70")
+            self.extra = ui.column().classes("w-full gap-1")
             self.form = ui.column().classes("w-full gap-1")
             self.env_box = ui.column().classes("w-full gap-1")
             with ui.row().classes("w-full items-center no-wrap mt-2"):
@@ -123,7 +226,7 @@ class step_panel:
                 self.spinner.set_visibility(False)
             self.log = ui.log(max_lines=5000).classes("w-full h-48").style(MONO)
             self.outcome = ui.column().classes("w-full")
-            ui.label("work directory: %s" % self.page.work.root).classes("text-xs opacity-60 break-all")
+            self.where = ui.label(self.target.where()).classes("text-xs opacity-60 break-all")
         self.render()
 
     def set_script(self, name):
@@ -137,8 +240,12 @@ class step_panel:
     def render(self):
         spec = self.spec()
         self.help.text = spec.help
+        self.extra.clear()
+        with self.extra:
+            self.target.render_extra(self)
+        self.where.text = self.target.where()
         self.form.clear()
-        keys = self.page.db.keys() if self.page.db is not None else []
+        keys = self.target.db.keys() if self.target.db is not None else []
         with self.form:
             if spec.head:
                 self.render_items([it for it in spec.items(self.values) if it[2][0] == "head"], keys)
@@ -187,11 +294,22 @@ class step_panel:
         label = a.name
         cb = lambda e, loc=loc: self.set_value(loc, e.value)
         if a.kind in ("db", "db_maybe"):
-            ui.label("%s: %s%s" % (label, x or "(no database open)",
+            ui.label("%s: %s%s" % (label, self.target.primary_label(x),
                                     "  (created if missing)" if a.kind == "db_maybe" else "")).classes("text-sm")
             return
         with ui.row().classes("w-full items-center no-wrap gap-1"):
-            if a.kind == "tag_in" and keys:
+            nodes = self.target.inputs()
+            if a.kind == "db_in" and nodes:
+                # a flow node (@id) or a database file
+                w = ui.select(sorted(set(nodes) | ({x} if x else set())), value=x or None, label=label,
+                              with_input=True, new_value_mode="add-unique",
+                              on_change=lambda e, loc=loc: self.set_value(loc, e.value or "")) \
+                    .props("dense").classes("grow")
+
+                def put(v, w=w):
+                    w.options = sorted(set(w.options) | {v})
+                    w.value = v
+            elif a.kind == "tag_in" and keys:
                 opts = sorted(set(keys) | ({x} if x else set()))
                 w = ui.select(opts, value=x or None, label=label, with_input=True, new_value_mode="add-unique",
                               on_change=lambda e, loc=loc: self.set_value(loc, e.value or "")) \
@@ -228,11 +346,12 @@ class step_panel:
                 for v in vals:
                     ui.menu_item(v if len(v) <= 90 else v[:87] + "...", on_click=lambda v=v: put(v)).style(MONO)
 
-    def remember(self, st):
-        e = [("%s:%s" % (st.name, a.name), x) for a, x, _ in reversed(list(st.spec.items(st.values)))
+    def remember(self, name, argv, env):
+        spec = registry.BY_NAME[name]
+        e = [("%s:%s" % (name, a.name), x) for a, x, _ in reversed(list(spec.items(spec.parse(argv))))
              if a.kind not in ("db", "db_maybe")]
-        e += [("env:" + k, v) for k, v in st.env.items()]
-        e.append(("command", st.command()))
+        e += [("env:" + k, v) for k, v in env.items()]
+        e.append(("command", registry.join_command(env, name, argv)))
         try:
             self.page.history.add(e)
         except OSError as err:
@@ -241,6 +360,8 @@ class step_panel:
     async def pick(self, w):
         path = await file_picker(self.page.base)
         if path:
+            if isinstance(w, ui.select):
+                w.options = sorted(set(w.options) | {self.rel(path)})
             w.value = self.rel(path)
 
     # ---- edits ----
@@ -285,7 +406,7 @@ class step_panel:
         self.cmd.value = self.command()
         self.checks.clear()
         try:
-            msgs = self.current_step().check(self.page.db)
+            msgs = self.target.check(self.name, self.argv(), self.env)
         except Exception as e:
             msgs = [str(e)]
         with self.checks:
@@ -303,11 +424,7 @@ class step_panel:
         except ValueError as e:
             ui.notify(str(e), type="warning")
             return
-        spec = registry.BY_NAME[name]
-        if spec.primary_kind() in ("db", "db_maybe") and self.page.db is not None and \
-                os.path.abspath(os.path.join(self.page.base, spec.get_primary(values))) != self.page.db.path:
-            ui.notify("the step applies to the open database %s" % self.rel(self.page.db.path), type="info")
-            values = spec.set_primary(values, self.rel(self.page.db.path))
+        values = self.target.normalize(registry.BY_NAME[name], values)
         self.name, self.values, self.env = name, values, env
         self.script_sel.value = name
         self.render()
@@ -316,9 +433,11 @@ class step_panel:
     async def preview(self):
         if self.running:
             return
+        name, env = self.name, dict(self.env)
         try:
-            st = self.current_step()
-        except ValueError as e:
+            argv = self.argv()
+            self.spec().parse(argv)
+        except (ValueError, AssertionError) as e:
             ui.notify(str(e), type="warning")
             return
         self.running = True
@@ -327,10 +446,10 @@ class step_panel:
         self.spinner.set_visibility(True)
         self.log.clear()
         self.outcome.clear()
-        self.log.push("$ " + st.command())
-        self.remember(st)
+        self.log.push("$ " + registry.join_command(env, name, argv))
+        self.remember(name, argv, env)
         try:
-            m = await self.page.work.run(st, log=self.log.push, procs=self.procs)
+            m = await self.target.run(name, argv, env, self.log.push, self.procs)
         except Exception as e:
             m = {"ok": False, "error": str(e)}
         finally:
@@ -343,17 +462,19 @@ class step_panel:
             with self.outcome:
                 ui.label("ERROR: " + m["error"]).classes("text-negative text-sm")
             return
-        await self.show_result(m)
+        self.show_result(m)
 
     def stop(self):
         for p in list(self.procs):
-            p.kill()
+            try:
+                p.kill()
+            except ProcessLookupError:
+                pass
 
-    async def show_result(self, m):
-        child = await run.io_bound(database.load, self.page.work.node(m["key"]))
-        ref = await run.io_bound(database.load, m["reference"]) if m["reference"] else None
-        d = await run.io_bound(runner.diff, ref.res if ref else None, child.res)
-        self.result = (m, d, child, ref)
+    def show_result(self, m):
+        # m: result of target.run (child, ref, diff, ...)
+        self.result = m
+        d = m["diff"]
         self.outcome.clear()
         with self.outcome:
             with ui.row().classes("items-center gap-1"):
@@ -371,39 +492,22 @@ class step_panel:
             bad = d["nonfinite"]
             if m["name"] in ("jks_fit", "jks_slow_fit"):
                 # nan marks the points outside the fit range in <fit>.<tag>.input.<j>
-                fit = runner.step(m["name"], m["argv"], m["env"], m["base"]).values["tail"][1]
+                fit = registry.BY_NAME[m["name"]].parse(m["argv"])["tail"][1]
                 bad = [t for t in bad if not (t.startswith(fit + ".") and ".input." in t)]
             if bad:
                 ui.label("⚠ non-finite numbers in %s" % ", ".join(bad[:5])).classes("text-xs text-warning")
             if any("ERROR" in l for l in m["log"].splitlines()):
                 ui.label("⚠ the script printed ERROR").classes("text-xs text-warning")
-        self.page.show_preview(self)
+        self.target.show(self)
 
     def commit_controls(self):
         # buttons for the preview banner
-        m, d, child, ref = self.result
-        if m["kind"] in ("db", "db_maybe") and self.page.db is not None and m["primary"] == self.page.db.path:
-            ui.button("Commit to %s" % os.path.basename(m["primary"]), icon="check",
-                      on_click=lambda: self.commit(None)).props("color=positive")
-        else:
-            target = ui.input("save as", value=self.rel(m["primary"])).props("dense").style(MONO)
-            ui.button("Save", icon="save", on_click=lambda: self.commit(target.value)).props("color=positive")
-        ui.button("Discard", icon="close", on_click=self.discard).props("flat")
+        self.target.commit_controls(self)
 
-    async def commit(self, target):
-        m = self.result[0]
-        try:
-            path = self.page.work.commit(m, target)
-        except (RuntimeError, FileExistsError) as e:
-            ui.notify(str(e), type="negative")
-            return
-        ui.notify("committed: %s" % m["command"], type="positive")
+    def done(self):
         self.result = None
         self.outcome.clear()
-        await self.page.after_commit(path)
-        self.render()  # tag lists and checks against the new state
 
     def discard(self):
-        self.result = None
-        self.outcome.clear()
-        self.page.show_current()
+        self.done()
+        self.target.discard(self)

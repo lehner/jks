@@ -481,6 +481,12 @@ class flow:
         os.chmod(tmp, 0o755)
         os.replace(tmp, path)
 
+    def copy(self):
+        # same file and work directory, independent list of nodes (for previews)
+        f = flow(self.path)
+        f.nodes, f.trailer = dict(self.nodes), list(self.trailer)
+        return f
+
     # ---- editing ----
     def check(self, n, before):
         # before: ids of the nodes that may be read
@@ -947,8 +953,10 @@ class engine:
         return d
 
     # ---- running ----
-    async def run(self, targets=None, jobs=1, log=lambda id, line: None, force=False, procs=None):
+    async def run(self, targets=None, jobs=1, log=lambda id, line: None, force=False, procs=None,
+                  state=lambda id, s: None):
         # compute targets (default: all nodes) and what they need; returns id -> result
+        # state(id, s) is told "running", "ok" and "failed"
         keys = self.keys()
         want = self.flow.ancestors(targets) if targets else set(self.flow.nodes)
         for i in want:
@@ -975,6 +983,7 @@ class engine:
                 if self.have(keys[i]) and not (force and targets and i in targets):
                     done[i].set_result(True)
                     return
+                state(i, "running")
                 if n.kind == "loop":
                     res = await self.build_loop(n, keys, lambda line: log(i, line), procs)
                 else:
@@ -984,6 +993,7 @@ class engine:
                 res = {"ok": False, "error": str(e), "id": i, "key": keys.get(i)}
             results[i] = res
             self.record(n, keys[i], res)
+            state(i, "ok" if res["ok"] else "failed")
             done[i].set_result(res["ok"])
 
         await asyncio.gather(*[one(i) for i in todo])

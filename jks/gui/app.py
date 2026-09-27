@@ -18,16 +18,19 @@
 #
 # jks_gui application: page layout, command line and access token.
 #
-import argparse, glob, http.cookies, os, secrets, sys, urllib.parse
+import argparse, glob, http.cookies, os, re, secrets, sys, urllib.parse
 from nicegui import app, run, ui
 from jks.flow import runner
 from jks.gui import database, history
 from jks.gui.browser import database_view
 from jks.gui.filepicker import file_picker
-from jks.gui.step import MONO, step_panel
+from jks.gui.step import MONO, preview_view, step_panel
+from jks.gui import flowview
+from jks.flow import core
 
 recent = []
 work_name = ".jks_work"
+jobs = 2  # parallel steps in flows
 inputs = None  # history.history of the step panel's fields
 
 
@@ -95,6 +98,9 @@ class db_page:
                 .props("flat dense color=white").tooltip("reload from disk")
             ui.button(icon="add_task", on_click=self.toggle_panel) \
                 .props("flat dense color=white").tooltip("new step")
+            if self.file:
+                ui.button(icon="account_tree", on_click=self.new_flow) \
+                    .props("flat dense color=white").tooltip("new flow from this database")
             ui.button(icon="dark_mode", on_click=self.toggle_dark).props("flat dense color=white").tooltip("dark mode")
         self.drawer = ui.right_drawer(value=False).props("width=520 bordered").classes("p-3")
         self.body = ui.column().classes("w-full")
@@ -122,9 +128,33 @@ class db_page:
         return v.active
 
     async def pick(self):
-        path = await file_picker(self.base)
+        path = await file_picker(self.base, pattern=(".jks", ".sh"))
         if path:
             ui.navigate.to(url(path))
+
+    def new_flow(self):
+        # a flow file with this database as its source
+        stem = os.path.splitext(os.path.basename(self.file))[0]
+        with ui.dialog() as dlg, ui.card().classes("w-[36rem]"):
+            ui.label("New flow starting from %s" % self.file).classes("text-sm break-all")
+            path = ui.input("flow file", value=os.path.join(self.base, stem + ".flow.sh")).classes("w-full").style(MONO)
+
+            def go():
+                p = os.path.abspath(os.path.expanduser(path.value))
+                if os.path.exists(p):
+                    ui.notify("%s exists" % p, type="negative")
+                    return
+                fl = core.flow(p)
+                src = os.path.relpath(self.file, os.path.dirname(p))
+                sid = re.sub(r"[^A-Za-z0-9_.-]", "_", stem) or "source"
+                fl.add(core.node(sid if core.ID.match(sid) else "source", "source", source=src))
+                fl.save()
+                remember(p)
+                ui.navigate.to(url(p))
+            with ui.row():
+                ui.button("Create", on_click=go)
+                ui.button("Cancel", on_click=dlg.close).props("flat")
+        dlg.open()
 
     def toggle_dark(self):
         self.dark.value = not self.dark.value
@@ -156,18 +186,9 @@ class db_page:
             self.view = database_view(self.db, self.dark, fit_source=self.fit_source, on_delete=self.delete_tags)
 
     def show_preview(self, panel):
-        m, d, child, ref = panel.result
         self.body.clear()
         with self.body:
-            with ui.row().classes("w-full items-center gap-2 px-3 py-1 bg-amber-100 dark:bg-amber-900 rounded"):
-                ui.icon("visibility")
-                ui.label("PREVIEW").classes("font-bold")
-                ui.label(m["command"]).classes("grow truncate text-xs").style(MONO)
-                panel.commit_controls()
-            st = runner.step(m["name"], m["argv"], m["env"], m["base"])
-            fit = st.values["tail"][1] if m["name"] in ("jks_fit", "jks_slow_fit") else None
-            self.view = database_view(child, self.dark, diff=d, ref=ref, fit_source=self.fit_source,
-                                      inputs=st.spec.tags_in(st.values), fit=fit)
+            self.view = preview_view(panel.result, self.dark, self.fit_source, panel.commit_controls)
 
     async def after_commit(self, path):
         if self.db is not None and path == self.db.path:
@@ -214,12 +235,22 @@ class db_page:
 
 @ui.page("/")
 async def index(file: str = ""):
+    if file and flowview.is_flow(file):
+        try:
+            p = flowview.flow_page(file, ui.dark_mode(False), inputs, jobs)
+        except (core.FlowError, OSError) as e:
+            ui.label("ERROR: cannot open the flow %s: %s" % (file, e)).classes("m-8 text-negative whitespace-pre-wrap")
+            return
+        remember(file)
+        await p.build()
+        return
     await db_page(file).build()
 
 
 def main(argv=None):
     p = argparse.ArgumentParser(prog="jks_gui", description="Graphical browser for jks databases.")
-    p.add_argument("files", nargs="*", help="databases to offer (the first one is opened)")
+    p.add_argument("files", nargs="*", help="databases or flow files to offer (the first one is opened)")
+    p.add_argument("--jobs", type=int, default=2, help="parallel steps when running flows (default: 2)")
     p.add_argument("--host", default="127.0.0.1", help="interface to bind (default: 127.0.0.1)")
     p.add_argument("--port", type=int, default=8080)
     p.add_argument("--no-token", action="store_true", help="do not require an access token")
@@ -230,8 +261,9 @@ def main(argv=None):
     p.add_argument("--work", default=".jks_work",
                    help="work directory for step results, relative to each database (default: .jks_work)")
     a = p.parse_args(argv)
-    global work_name, inputs
+    global work_name, inputs, jobs
     work_name = a.work
+    jobs = a.jobs
     inputs = history.history(a.history)
 
     for f in reversed(a.files):

@@ -28,13 +28,17 @@ _lock = threading.Lock()
 
 
 class database:
-    def __init__(self, path):
-        self.path = os.path.abspath(path)
-        st = os.stat(self.path)
-        self.stamp = (st.st_mtime_ns, st.st_size)
-        t0 = time.time()
-        self.res = jks.resamples(self.path)
-        self.load_time = time.time() - t0
+    def __init__(self, path, res=None):
+        # res: a database in memory (a flow node); path is then only its name
+        if res is not None:
+            self.path, self.stamp, self.res, self.load_time = path, None, res, 0.0
+        else:
+            self.path = os.path.abspath(path)
+            st = os.stat(self.path)
+            self.stamp = (st.st_mtime_ns, st.st_size)
+            t0 = time.time()
+            self.res = jks.resamples(self.path)
+            self.load_time = time.time() - t0
         self.origin = self.res.origin or {}
         self.tags = self.res.tags or []
         self.configs = [t for t in self.tags if t[0] != "!"]
@@ -43,6 +47,8 @@ class database:
         self._rows = None
 
     def changed_on_disk(self):
+        if self.stamp is None:
+            return False
         try:
             st = os.stat(self.path)
         except FileNotFoundError:
