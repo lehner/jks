@@ -69,7 +69,9 @@ def show(name):
                 if t is None:
                     ui.label("%s has no documentation page yet." % n).classes("m-4")
                     return
-                ui.markdown(t).classes("w-full jks-doc")
+                # code-friendly: no emphasis by underscores, so z_j, chi_min and jks_add_from
+                # stay as written (GitHub does not emphasize inside words either)
+                ui.markdown(t, extras=["fenced-code-blocks", "tables", "code-friendly"]).classes("w-full jks-doc")
                 links = see_also(t)
                 if links:
                     with ui.row().classes("gap-1"):
