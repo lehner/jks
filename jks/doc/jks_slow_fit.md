@@ -17,8 +17,9 @@ once from the full data) and used for all blocks.
 The central value and then every block `b` of the database (statistical and `!`
 variations) are minimized with scipy Nelder-Mead (`maxiter=10000`, tolerance
 `JKS_FIT_TOL`), each block starting from the command-line `guess` (not from the
-central result).  A block whose minimization fails twice aborts the script with an
-`AssertionError`.  The database is updated in place.
+central result).  Tags used as `r['tag']` parameters take the values of the block
+in every refit, as in `jks_fit`, so their fluctuation is propagated.  A block whose
+minimization fails twice aborts the script with an `AssertionError`.  The database is updated in place.
 
 ## Arguments
 
@@ -49,19 +50,19 @@ central result).  A block whose minimization fails twice aborts the script with 
 ```bash
 jks_slow_fit data.jks C "range(11,25)" "p[0]*math.exp(-p[1]*x)" "[0.012,0.43]" sfit1
 jks_slow_fit data.jks C "[ list(range(a,25)) for a in (10,11) ]" "p[0]*math.exp(-p[1]*x)" "[0.012,0.43]" sfit2
+jks_fit data.jks C "range(11,25)" "p[0]*math.exp(-p[1]*x)" "[0.012,0.43]" C.fit
+jks_add data.jks m "[ r['C.fit'][1] ]"
+jks_slow_fit data.jks C "range(11,25)" "p[0]*math.exp(-r['m'][0]*x)" "[0.012]" asfit
 ```
 
 `sfit1` = `[0.009392(462), 0.4101(41)]`, blocks agree with the `jks_fit` result to
-5e-6 (0.4 s instead of <1 ms for the blocks); `sfit2` holds the parameters of the
-two ranges (4 entries).
+6e-6 (0.4 s instead of <1 ms for the blocks); `sfit2` holds the parameters of the
+two ranges (4 entries).  `asfit` fits only the amplitude with the energy `m` taken
+from `C.fit` block by block: 0.00939175 +- 0.000462, the same as `jks_fit` with the
+same arguments.
 
 ## Notes
 
-- Frozen parameters from `r['tag']` references stay at the tag's mean in every block:
-  their fluctuation is not propagated (unlike `jks_fit`).  Example: fitting
-  `p[0]*math.exp(-r['E0'][0]*x)` with `E0` = fitted energy gives an amplitude error
-  6.6e-5 instead of 4.6e-4 from `jks_fit`, i.e. the same as treating `E0` as an exact
-  constant.
 - The Hessians are still computed (fixed step 1e-7, `JKS_HESSIAN_EPS` is not read)
   but not used for the stored result.
 - Useful as a check of the linearization in `jks_fit` when the fit is strongly
