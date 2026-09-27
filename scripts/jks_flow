@@ -33,16 +33,21 @@ usage = """%s command flow.sh [...]
                                      it in the cache); cmd as for jks_plot2, e.g. c1:C:title
   add flow.sh id parent script args  add a step; parent - for scripts that write a new
                                      database; @ is the node's database, @id another node's
+  block flow.sh id parent|- [-i id] [-f file] script.sh|-
+                                     add a bash block: it changes $DB (a copy of parent), reads
+                                     $IN_<id> of each -i node and the -f files; script.sh|-: stdin
   rm flow.sh id                      remove a node nobody reads
   rebase flow.sh id parent           let node id (and all after it) start from another node
   fmt flow.sh                        rewrite the file in canonical form
   du flow.sh                         disk usage of the work directory and of every node
+  import flow.sh mk                  a new flow from an mk driver (a bash script of jks_* calls);
+                                     what cannot be mapped is reported and kept as comments
   gc flow.sh [-n]                    delete stored results no node needs (-n: only report)
 
 The flow file is a bash script; "bash flow.sh" replays it without the cache.  Loops
 (jks_begin/for/jks_apply/done) are written into the file directly.""" % sys.argv[0]
 
-if len(sys.argv) < 3 or sys.argv[1] not in ("status", "run", "export", "log", "source", "list", "plot", "add", "rm", "rebase", "fmt", "du", "gc"):
+if len(sys.argv) < 3 or sys.argv[1] not in ("status", "run", "export", "log", "source", "list", "plot", "add", "rm", "rebase", "fmt", "du", "gc", "import", "block"):
     print(usage)
     sys.exit(0)
 
@@ -62,7 +67,25 @@ def size(n):
 
 
 try:
-    if cmd in ("source", "list", "plot", "add") and not os.path.exists(fn):
+    if cmd == "import":
+        from jks.flow import mk
+        if len(args) != 1:
+            fail("usage: jks_flow import flow.sh mk")
+        if os.path.exists(fn):
+            fail("%s exists already" % fn)
+        fl, report, files, lists = mk.import_mk(args[0], fn)
+        fl.save()
+        for line, text in report:
+            print("%s:%d: %s" % (args[0], line, text))
+        steps = sum(1 for n in fl.nodes.values() if n.kind != "source")
+        print("%s: %d nodes (%d sources%s)" % (fn, len(fl.nodes), len(fl.nodes) - steps,
+                                            ", lists " + " ".join(lists) if lists else ""))
+        for p, i in sorted(files.items()):
+            print("  %s is node %s" % (p, i))
+        print("compute with: jks_flow run %s" % fn)
+        sys.exit(0)
+
+    if cmd in ("source", "list", "plot", "add", "block") and not os.path.exists(fn):
         fl = flow.flow(fn)
     else:
         fl = flow.flow.load(fn)
@@ -80,6 +103,10 @@ try:
             elif n.kind == "step":
                 env, words = n.cmd.words()
                 what = " ".join(env + words)
+            elif n.kind == "block":
+                first = next((l.strip() for l in n.block["script"].split("\n")
+                              if l.strip() and not l.strip().startswith("#")), "")
+                what = "block%s: %s" % (" (inputs %s)" % " ".join(n.block["inputs"]) if n.block["inputs"] else "", first)
             else:
                 what = "loop over %s: %s (%s)" % (", ".join(n.loop_vars()), ", ".join(c.name for c in n.body), r["detail"])
             print("%-16s %-8s %-22s %s" % (r["id"], r["status"], r["reason"], what[:100]))
@@ -172,6 +199,20 @@ try:
             env[k] = v
         fl.add(flow.node(args[0], "step", None if args[1] == "-" else args[1],
                          flow.command(os.path.basename(args[2]), args[3:], env)))
+        fl.save()
+
+    elif cmd == "block":
+        if len(args) < 3:
+            fail("block flow.sh id parent|- [-i id] [-f file] script.sh|-")
+        id, parent, rest, inputs, files = args[0], args[1], args[2:], [], []
+        while len(rest) > 1 and rest[0] in ("-i", "-f"):
+            (inputs if rest[0] == "-i" else files).append(rest[1])
+            rest = rest[2:]
+        if len(rest) != 1:
+            fail("block flow.sh id parent|- [-i id] [-f file] script.sh|-")
+        script = sys.stdin.read() if rest[0] == "-" else open(rest[0]).read()
+        fl.add(flow.node(id, "block", None if parent == "-" else parent, meta={"files": files} if files else None,
+                         block={"script": script if script.endswith("\n") else script + "\n", "inputs": inputs}))
         fl.save()
 
     elif cmd == "rm":

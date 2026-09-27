@@ -40,11 +40,11 @@ def preview_view(r, dark, fit_source, controls, height="calc(100vh - 8rem)", tit
         ui.label(title).classes("font-bold")
         ui.label(r["command"]).classes("grow truncate text-xs").style(MONO)
         controls()
-    spec = registry.BY_NAME[r["name"]]
-    v = spec.parse(r["argv"])
+    spec = registry.BY_NAME.get(r["name"])  # None for a block
+    v = spec.parse(r["argv"]) if spec else None
     fit = v["tail"][1] if r["name"] in ("jks_fit", "jks_slow_fit") else None
     return database_view(r["child"], dark, diff=r["diff"], ref=r["ref"], fit_source=fit_source,
-                         inputs=spec.tags_in(v), fit=fit, height=height)
+                         inputs=spec.tags_in(v) if spec else [], fit=fit, height=height)
 
 
 def rel(base, p):

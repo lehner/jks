@@ -26,7 +26,8 @@ node (everything after an edited node is recomputed); the plot panel makes
 make nodes stale; "Run stale" computes them.  The storage button in the header shows
 the disk usage of the flow's work directory; its dialog lists every node's stored
 result and cleans up results no node needs (as `jks_flow gc`).  The selected node's
-toolbar shows the size of its result.
+toolbar shows the size of its result.  "Add block" adds a bash block after the
+selected node (script, further inputs, files it reads; see `jks_flow`).
 
 ## Arguments
 

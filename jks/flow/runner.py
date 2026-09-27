@@ -92,6 +92,35 @@ async def execute(name, argv, env, cwd, log=lambda line: None, procs=None):
     return rc, lines
 
 
+async def execute_block(script, env, cwd, log=lambda line: None, procs=None):
+    # run the bash script of a block (as "bash flow.sh" does) -> (exit code, output lines)
+    e = clean_env(env)
+    e["PATH"] = os.pathsep.join([os.path.dirname(registry.script_path("jks_add")), os.path.dirname(sys.executable),
+                                 e.get("PATH", "")])
+    lines = []
+    proc = await asyncio.create_subprocess_exec("bash", "-euo", "pipefail", cwd=cwd, env=e,
+                                                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                                                stderr=asyncio.subprocess.STDOUT)
+    if procs is not None:
+        procs.append(proc)
+    try:
+        proc.stdin.write(script.encode())
+        await proc.stdin.drain()
+        proc.stdin.close()
+        while True:
+            b = await proc.stdout.readline()
+            if not b:
+                break
+            line = b.decode(errors="replace").rstrip("\n")
+            lines.append(line)
+            log(line)
+        rc = await proc.wait()
+    finally:
+        if procs is not None and proc in procs:
+            procs.remove(proc)
+    return rc, lines
+
+
 class step:
     def __init__(self, name, argv, env=None, base=None):
         self.name, self.argv, self.env = name, list(argv), dict(env or {})

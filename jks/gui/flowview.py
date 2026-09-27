@@ -59,7 +59,14 @@ def stored_text(u):
     return t
 
 
-SYMBOL = {"source": "rect", "list": "diamond", "step": "circle", "loop": "roundRect", "plot": "triangle"}
+SYMBOL = {"source": "rect", "list": "diamond", "step": "circle", "loop": "roundRect", "plot": "triangle",
+          "block": "pin"}
+
+
+def block_summary(n):
+    # the first line of a block's script that is not a comment
+    first = next((l.strip() for l in n.block["script"].split("\n") if l.strip() and not l.strip().startswith("#")), "")
+    return "block%s: %s" % (" (reads %s)" % ", ".join(n.block["inputs"]) if n.block["inputs"] else "", first)
 
 
 def is_flow(path):
@@ -94,18 +101,7 @@ def _plain(a):
     return re.sub(r"[.]?\$\{?[A-Za-z_][A-Za-z0-9_]*\}?", "", a)
 
 
-def new_id(fl, name, argv):
-    # the first output tag if it makes a readable id, else the script name
-    spec = registry.BY_NAME[name]
-    try:
-        outs = [t for t in spec.tags_out(spec.parse(argv)) if "*" not in t]
-    except ValueError:
-        outs = []
-    base = outs[0] if outs and core.ID.match(outs[0]) else name.replace("jks_", "")
-    i, k = base, 2
-    while i in fl.nodes:
-        i, k = "%s.%d" % (base, k), k + 1
-    return i
+new_id = core.new_id
 
 
 class flow_target:
@@ -679,6 +675,7 @@ class flow_page:
             info = self.status.get(i, {})
             desc = {"source": lambda: "source %s" % n.source, "list": lambda: "list %s" % " ".join(n.values),
                     "step": lambda: " ".join(n.lines()),
+                    "block": lambda: block_summary(n),
                     "loop": lambda: "loop over %s: %s" % (", ".join(n.loop_vars()), ", ".join(c.name for c in n.body)),
                     "plot": lambda: "%s figure -> %s: %s" % (n.plot["script"], n.plot["out"], " ".join(n.plot["cmds"]))}[n.kind]()
             tip = "%s — %s%s<br>%s" % (i, word, (" (%s)" % info["reason"]) if info.get("reason") else "",
@@ -829,7 +826,9 @@ class flow_page:
             if n.has_db():
                 ui.button("Add step", icon="add", on_click=self.start_add).props("flat dense")
                 ui.button("Add plot", icon="insert_chart", on_click=lambda: self.start_plot()).props("flat dense")
-            if n.kind in ("step", "loop", "plot"):
+                ui.button("Add block", icon="terminal", on_click=lambda: self.edit_block(None, id)).props("flat dense") \
+                    .tooltip("a bash script on this node's database, for what no jks script does")
+            if n.kind in ("step", "loop", "plot", "block"):
                 ui.button("Edit", icon="edit", on_click=lambda: self.start_edit(id)).props("flat dense")
             if n.kind == "plot" and info.get("key") and self.en.figure(info["key"] if st == "ok" else info.get("built") or ""):
                 k = info["key"] if st == "ok" else info.get("built")
@@ -837,12 +836,12 @@ class flow_page:
                 ui.link("Open PDF", "/jks_figure/%s.pdf" % k, new_tab=True).classes("text-sm")
             elif n.kind == "list":
                 ui.button("Edit", icon="edit", on_click=lambda: self.edit_list(id)).props("flat dense")
-            if n.kind in ("step", "loop") and n.parent:
+            if n.kind in ("step", "loop", "block") and n.parent:
                 ui.button("Rebase", icon="alt_route", on_click=lambda: self.start_rebase(id)).props("flat dense") \
                     .tooltip("start from another node; everything after this node is kept")
-            if st != "ok" and n.kind in ("step", "loop", "plot"):
+            if st != "ok" and n.kind in ("step", "loop", "plot", "block"):
                 ui.button("Run", icon="play_arrow", on_click=lambda: self.run_nodes([id])).props("flat dense")
-            if n.kind in ("step", "loop", "plot"):
+            if n.kind in ("step", "loop", "plot", "block"):
                 ui.button("Log", icon="article", on_click=lambda: self.show_log(id)).props("flat dense")
             if (n.has_db() or n.kind == "plot") and st in ("ok", "stale"):
                 ui.button("Export", icon="save_alt", on_click=lambda: self.export(id)).props("flat dense")
@@ -878,7 +877,7 @@ class flow_page:
                 ui.label("%s is %s." % (id, STATUS.get(info.get("status", "new"), ("", "not computed"))[1]))
                 if info.get("reason"):
                     ui.label(info["reason"]).classes("opacity-70")
-                if n.kind in ("step", "loop"):
+                if n.kind in ("step", "loop", "block"):
                     ui.button("Run", icon="play_arrow", on_click=lambda: self.run_nodes([id]))
             return
         with self.body, ui.row().classes("m-4 items-center"):
@@ -985,6 +984,9 @@ class flow_page:
         if n.kind == "plot":
             self.start_plot(edit=id)
             return
+        if n.kind == "block":
+            self.edit_block(id)
+            return
         self.show_panel("step")
         self.target.edit = id
         self.drawer.value = True
@@ -996,6 +998,72 @@ class flow_page:
         else:
             self.target.loop = None
             self.panel.load_command(n.cmd.name, n.cmd.argv, n.cmd.env)
+
+    def edit_block(self, id, parent=None):
+        # a new block after parent (id None) or the definition of block id
+        old = self.fl.nodes.get(id) if id else None
+        ids = list(self.fl.nodes)
+        before = ids[: ids.index(id)] if old else ids
+        dbs = [i for i in before if self.fl.nodes[i].has_db()]
+        with ui.dialog().props("persistent") as dlg, ui.card().classes("w-[56rem] max-w-full"):
+            ui.label("Edit block %s" % id if old else "New block").classes("text-lg font-bold")
+            ui.label("A bash script (run with bash -euo pipefail in the flow's directory). $DB is a copy of the "
+                     "database of the node it starts from; what the script leaves in $DB is the node's database. "
+                     "Further input nodes are $IN_<id> (characters other than letters, digits and _ become _). "
+                     "The flow cannot see inside: declare the files the script reads so that changes make it stale.") \
+                .classes("text-xs opacity-70")
+            with ui.row().classes("w-full gap-2 items-end"):
+                name = ui.input("node id", value=id or core.unique_id(self.fl, "block")).classes("w-48").style(MONO)
+                if old:
+                    name.disable()
+                start = ui.select(["-"] + dbs, label="starts from ($DB)", with_input=True,
+                                  value=(old.parent or "-") if old else (parent or "-")).classes("w-56")
+                inputs = ui.select(dbs, label="further inputs ($IN_...)", multiple=True, with_input=True,
+                                   value=list(old.block["inputs"]) if old else []).classes("grow").props("use-chips")
+            files = ui.input("files the script reads (space separated, globs allowed)",
+                             value=" ".join(old.files()) if old else "").classes("w-full").style(MONO)
+            script = ui.textarea("script", value=old.block["script"] if old else
+                                 '# e.g. a start value for a fit from the data\n'
+                                 'c=$(jks_info "$DB" C 1 | head -1 | awk \'{print $1}\')\n'
+                                 'jks_add "$DB" guess "[$c]"\n') \
+                .classes("w-full").props("rows=14 outlined").style(MONO + "; font-size: 0.85rem")
+            hint = ui.label().classes("text-xs").style(MONO)
+
+            def show_hint():
+                hint.set_text(", ".join("$%s = %s" % (core.in_var(i), i) for i in (inputs.value or [])))
+            inputs.on_value_change(show_hint)
+            show_hint()
+
+            async def save():
+                meta = dict(old.meta) if old else {}
+                fs = files.value.split()
+                if fs:
+                    meta["files"] = fs
+                else:
+                    meta.pop("files", None)
+                text = script.value if script.value.endswith("\n") else script.value + "\n"
+                n = core.node(name.value.strip(), "block", None if start.value in (None, "-") else start.value,
+                              meta=meta, notes=old.notes if old else (),
+                              block={"script": text, "inputs": [i for i in (inputs.value or []) if i != start.value]})
+                try:
+                    if old:
+                        self.fl.replace(n)
+                    else:
+                        self.fl.add(n)
+                except core.FlowError as e:
+                    self.notify(str(e), type="negative", multi_line=True)
+                    return
+                dlg.close()
+                self.save()
+                await self.refresh()
+                await self.select(n.id)
+                after = sorted(self.fl.descendants(n.id), key=list(self.fl.nodes).index)
+                await self.run_nodes([n.id] + after)
+            with ui.row().classes("w-full"):
+                ui.button("Save and run", icon="play_arrow", on_click=save)
+                ui.space()
+                ui.button("Cancel", on_click=dlg.close).props("flat")
+        dlg.open()
 
     def start_rebase(self, id):
         n = self.fl.nodes[id]
@@ -1044,9 +1112,9 @@ class flow_page:
         ref = await self.node_db(fl, parent)
         d = await run.io_bound(runner.diff, ref.res, child.res)
         n = fl.nodes[id]
-        c = n.cmd if n.kind == "step" else n.body[0]
+        c = n.cmd if n.kind == "step" else n.body[0] if n.kind == "loop" else core.command(None, [])
         result = {"ok": True, "child": child, "ref": ref, "diff": d, "name": c.name, "argv": c.argv, "env": c.env,
-                  "command": " ".join(n.lines()) if n.kind == "step" else "loop %s on %s" % (id, parent)}
+                  "command": " ".join(n.lines()) if n.kind == "step" else "%s %s on %s" % (n.kind, id, parent)}
 
         def controls():
             async def save():

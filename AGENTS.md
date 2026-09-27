@@ -157,12 +157,13 @@ jks/gui/history.py     recently used field values (20 per "script:argument", "en
                        "command"), ~/.config/jks_gui/history.json, merged on every save
 jks/flow/core.py       flows: DAG of steps in a bash file (parse/write), engine with keys,
                        status, delta store, parallel runs, export, gc (no GUI imports)
+jks/flow/mk.py         import of an mk driver as a flow (jks_flow import)
 jks/gui/plotpanel.py   plot panel: jks_plot2 commands as typed rows or text, preview
 jks/gui/flowview.py    flow page: graph (ECharts, layered layout), node inspector
                        (database_view of the node), flow_target for the step panel
 jks/gui/app.py         page, command line, access-token middleware
 scripts/jks_gui        launcher
-scripts/jks_flow       command line for flows (status, run, export, log, add, rm, fmt, du, gc)
+scripts/jks_flow       command line for flows (status, run, export, log, add, rm, fmt, du, gc, import)
 ```
 
 ### Flows (`jks_flow`)
@@ -217,6 +218,22 @@ scripts/jks_flow       command line for flows (status, run, export, log, add, rm
   to `bash flow.sh` for every node (lqcd example incl. plsa/blsa/fit/take and a
   JKS_CORRELATION_STRENGTH branch).  180 MB database, 6 steps: 173 MB store.
 - Files are written with `flow._write` (resamples format, no `os.getlogin`).
+- Blocks (`kind == "block"`, `jks_block id parent|- inputs... <<'JKS'` ... `JKS`): the
+  here-document is kept verbatim (no continuation joining); run by
+  `runner.execute_block` (bash -euo pipefail, stdin, cwd = flow base, PATH with the
+  scripts, `$DB`, `$IN_<id>` = `core.in_var`) and in the replay by the `jks_block`
+  header function.  Key: script text, inputs, `code_hash`, hashes of the `jks_*`
+  names in the text (`node_scripts`), declared `meta["files"]` (`block_files`, a
+  missing file makes the node missing).  GUI: "Add block" / Edit open `edit_block`.
+  The importer turns an unmapped statement naming exactly one database file into a
+  block (`importer.as_block`).
+- mk import (`jks/flow/mk.py`, `jks_flow import flow.sh mk`): a bash lexer (quotes,
+  escapes, continuations, comments, `$var`, `$(...)`) and a parser for simple commands
+  and `for` loops; `importer.files` maps every database file to the node holding its
+  current state.  Unmapped statements are reported and kept as comments before the
+  next node (`jks_flow import, mk line N: ...`).  Tested: the imported flow equals
+  `bash mk` for every database file (tests/test_flow.py, also the lqcd mk).
+  `core.new_id`/`core.unique_id` name nodes (also used by the GUI).
 - Disk usage (`engine.usage`, `jks_flow du`, the storage button in the GUI header): per
   node the stored result of its current key and of its last built key (loops with their
   iteration results), the work directory by part (store, tmp, files, other) and what

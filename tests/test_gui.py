@@ -157,3 +157,36 @@ def test_flow_page_usage_and_docs(ensemble, tmp_path, page):
     finally:
         g.stop()
     assert "Traceback" not in g.output()
+
+
+def test_add_block(ensemble, tmp_path, page):
+    d = str(tmp_path)
+    shutil.copyfile(ensemble["db"], os.path.join(d, "base.jks"))
+    f = os.path.join(d, "ana.sh")
+    run("jks_flow", "source", f, "raw", "base.jks")
+    run("jks_flow", "add", f, "grid", "raw", "jks_add", "@", "omega1", "np.linspace(0.3, 2.0, 30)")
+    run("jks_flow", "run", f)
+    g = gui(f, d)
+    try:
+        page.goto(g.url)
+        page.get_by_role("button", name="Add block").click()  # after the selected node, grid
+        page.get_by_text("New block").wait_for(timeout=10000)
+        page.get_by_role("textbox", name="script", exact=True).fill('jks_add "$DB" twice "2 * r[\'C\']"\n')
+        page.get_by_role("button", name="Save and run").click()
+        for _ in range(150):  # saved, then computed by the page
+            if "twice" in open(f).read():
+                line = [l for l in run("jks_flow", "status", f).stdout.split("\n") if l.startswith("block ")]
+                if line and line[0].split()[1] == "ok":
+                    break
+            page.wait_for_timeout(200)
+        from jks.flow import core
+        n = core.flow.load(f).nodes["block"]
+        assert n.kind == "block" and n.parent == "grid"
+        run("jks_flow", "export", f, "block", os.path.join(d, "b.jks"))
+        from conftest import load
+        r = load(os.path.join(d, "b.jks"))
+        assert (r.get("twice").mean() == 2 * r.get("C").mean()).all()
+        assert page.errors == []
+    finally:
+        g.stop()
+    assert "Traceback" not in g.output()

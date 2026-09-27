@@ -121,6 +121,17 @@ jks_figure() {
   if [[ $out == - ]]; then out="$W/$id.pdf"; else mkdir -p "$(dirname "$out")"; fi
   "$script" "$out" "$W/$input.jks" "$@"
 }
+jks_block() {
+  local id=$1 parent=$2 a
+  shift 2
+  rm -f "$W/$id.jks"
+  if [[ $parent != - ]]; then cp "$W/$parent.jks" "$W/$id.jks"; fi
+  (
+    export DB="$W/$id.jks"
+    for a in "$@"; do export "IN_${a//[^A-Za-z0-9_]/_}=$W/$a.jks"; done
+    bash -euo pipefail
+  )
+}
 jks_list() { local n=$1; shift; printf '%%s\\n' "$@" > "$W/$n.list"; }
 jks_list_values() { cat "$W/$1.list" || kill $$; }
 jks_values() {
@@ -219,11 +230,22 @@ class command:
                        dict((k, _subst(v, it)) for k, v in self.env.items()))
 
 
+BLOCK_END = "JKS"  # end of the here-document of a block
+SCRIPT_NAME = re.compile(r"(?<![A-Za-z0-9_.-])(jks_[A-Za-z0-9_]+|dump-corrs|list-corrs)(?![A-Za-z0-9_.-])")
+
+
+def in_var(id):
+    # the variable of input node id in a block
+    return "IN_" + re.sub(r"[^A-Za-z0-9_]", "_", id)
+
+
 class node:
     # kind: source (a database file), list (words), step (one command), loop (commands per iteration),
-    # plot (a figure of the parent: plot = {"script", "out" (a path or -), "cmds"})
+    # plot (a figure of the parent: plot = {"script", "out" (a path or -), "cmds"}),
+    # block (a bash script on $DB, a copy of the parent, with $IN_<id> of further inputs;
+    # block = {"script", "inputs"}, meta["files"] the external files it reads)
     def __init__(self, id, kind, parent=None, cmd=None, source=None, values=None, loops=None, body=None,
-                 meta=None, notes=(), plot=None):
+                 meta=None, notes=(), plot=None, block=None):
         self.id, self.kind, self.parent = id, kind, parent
         self.cmd = cmd
         self.source = source
@@ -231,6 +253,7 @@ class node:
         self.loops = list(loops or [])  # [{"vars": [..], "kind": words|seq|values|list, ...}]
         self.body = list(body or [])  # [command]
         self.plot = dict(plot) if plot else None
+        self.block = dict(block) if block else None
         self.meta = dict(meta or {})
         self.meta["id"] = id
         self.notes = list(notes)
@@ -245,7 +268,13 @@ class node:
         return [self.cmd] if self.kind == "step" else self.body
 
     def refs(self):
+        if self.kind == "block":
+            return list(self.block["inputs"])
         return _refs([a for c in self.commands() for a in c.argv])
+
+    def files(self):
+        # external files a block reads (declared)
+        return list(self.meta.get("files", [])) if self.kind == "block" else []
 
     def value_inputs(self):
         # nodes holding loop values (levels still being edited may not name one yet)
@@ -274,6 +303,9 @@ class node:
             return {"list": self.values}
         if self.kind == "step":
             return dict(self.cmd.definition(), parent=self.parent)
+        if self.kind == "block":
+            return {"parent": self.parent, "block": self.block["script"], "inputs": self.block["inputs"],
+                    "files": self.files()}
         return {"parent": self.parent, "loops": self.loops, "body": [c.definition() for c in self.body]}
 
     def lines(self):
@@ -288,6 +320,9 @@ class node:
         if self.kind == "step":
             env, words = self.cmd.words()
             return [" ".join(env + ["jks_step", self.id, self.parent or "-"] + words)]
+        if self.kind == "block":
+            return [" ".join(["jks_block", self.id, self.parent or "-"] + self.block["inputs"] +
+                             ["<<'%s'" % BLOCK_END])] + self.block["script"].rstrip("\n").split("\n") + [BLOCK_END]
         out = ["jks_begin %s %s" % (self.id, self.parent)]
         ind = ""
         for l in self.loops:
@@ -313,6 +348,23 @@ class node:
         return out
 
 
+def unique_id(fl, base):
+    i, k = base, 2
+    while i in fl.nodes:
+        i, k = "%s.%d" % (base, k), k + 1
+    return i
+
+
+def new_id(fl, name, argv):
+    # the first output tag if it makes a readable id, else the script name
+    spec = registry.BY_NAME[name]
+    try:
+        outs = [t for t in spec.tags_out(spec.parse(argv)) if "*" not in t]
+    except ValueError:
+        outs = []
+    return unique_id(fl, outs[0] if outs and ID.match(outs[0]) else name.replace("jks_", ""))
+
+
 class flow:
     def __init__(self, path):
         self.path = os.path.abspath(path)
@@ -331,6 +383,16 @@ class flow:
         while i < len(lines):
             no, line = i + 1, lines[i]
             i += 1
+            if re.match(r"^jks_block\s.*<<'%s'\s*$" % BLOCK_END, line.strip()):
+                body = []
+                while i < len(lines) and lines[i] != BLOCK_END:
+                    body.append(lines[i])
+                    i += 1
+                if i >= len(lines):
+                    raise FlowError("%s:%d: the block is not closed with a line %s" % (path, no, BLOCK_END))
+                i += 1
+                logical.append((no, line.strip() + "\n" + "\n".join(body)))
+                continue
             while line.endswith("\\") and not line.lstrip().startswith("#") and i < len(lines):
                 line = line[:-1] + " " + lines[i].strip()
                 i += 1
@@ -360,6 +422,15 @@ class flow:
                 raise FlowError("%s: command without a #@jks line before it" % where)
             if s.startswith("jks_begin"):
                 n, k = f.parse_loop(logical, k - 1, meta, notes, path)
+            elif s.startswith("jks_block"):
+                first, _, script = line.partition("\n")
+                env, words = f.split(first.strip(), where)
+                if env or len(words) < 4 or words[-1] != "<<%s" % BLOCK_END:
+                    raise FlowError("%s: expected jks_block id parent [input ...] <<'%s'" % (where, BLOCK_END))
+                n = node(words[1], "block", None if words[2] == "-" else words[2], meta=meta, notes=notes,
+                         block={"script": script + "\n" if script else "", "inputs": words[3:-1]})
+                if n.id != meta["id"]:
+                    raise FlowError("%s: the block is for %s but #@jks names %s" % (where, n.id, meta["id"]))
             else:
                 n = f.parse_command(s, meta, notes, where)
             f.add(n)
@@ -537,6 +608,17 @@ class flow:
             if any("$" in c for c in n.plot["cmds"]):
                 raise FlowError("%s: variables are only allowed inside loops" % n.id)
             return
+        if n.kind == "block":
+            b = n.block
+            if not b["script"].strip():
+                raise FlowError("%s: the block has no script" % n.id)
+            if BLOCK_END in b["script"].split("\n"):
+                raise FlowError("%s: the script of a block cannot have a line %s" % (n.id, BLOCK_END))
+            if n.parent in b["inputs"] or len(set(b["inputs"])) != len(b["inputs"]):
+                raise FlowError("%s: inputs of a block are listed once (the parent is $DB)" % n.id)
+            if not isinstance(n.meta.get("files", []), list):
+                raise FlowError("%s: files is a list of paths" % n.id)
+            return
         if n.kind == "loop":
             if n.parent is None:
                 raise FlowError("%s: a loop needs the node it starts from" % n.id)
@@ -606,7 +688,7 @@ class flow:
         # node id (and everything after it) starts from parent instead; the file is reordered
         # if parent comes later
         n = self.nodes.get(id)
-        if n is None or n.kind not in ("step", "loop") or n.parent is None:
+        if n is None or n.kind not in ("step", "loop", "block") or n.parent is None:
             raise FlowError("%s does not start from another node" % id)
         if parent not in self.nodes or not self.nodes[parent].has_db():
             raise FlowError("%s is not a database node" % parent)
@@ -816,6 +898,24 @@ class engine:
     def scripts(self, cmds):
         return [runner.file_hash(registry.script_path(c.name)) for c in cmds]
 
+    def node_scripts(self, n):
+        # hashes of the scripts a node runs (for a block: the jks scripts its text names)
+        if n.kind != "block":
+            return self.scripts(n.commands())
+        names = sorted(set(SCRIPT_NAME.findall(n.block["script"])))
+        return dict((x, runner.file_hash(registry.script_path(x))) for x in names
+                    if os.path.exists(registry.script_path(x)))
+
+    def block_files(self, n):
+        # content hashes of the declared files (globs allowed); a missing file is an error
+        out = {}
+        for p in n.files():
+            fs = sorted(glob.glob(self.path(p)))
+            if not fs:
+                raise OSError("%s: file %s not found" % (n.id, p))
+            out[p] = [[os.path.relpath(f, self.flow.base), self.file_hash(f)] for f in fs]
+        return out
+
     def key(self, n, keys):
         if n.kind == "source":
             k = "s" + self.file_hash(self.path(n.source))[:31]
@@ -831,6 +931,10 @@ class engine:
         if n.kind == "plot":
             d = {"script": [runner.file_hash(registry.script_path(n.plot["script"]))], "code": code_hash(),
                  "def": n.definition(), "inputs": {n.parent: keys[n.parent]}}
+            return _hash(d)
+        if n.kind == "block":
+            d = {"script": self.node_scripts(n), "code": code_hash(), "def": n.definition(),
+                 "inputs": dict((r, keys[r]) for r in n.inputs()), "external": self.block_files(n)}
             return _hash(d)
         if n.kind == "step":
             d = {"script": self.scripts([n.cmd]), "code": code_hash(), "def": n.definition(),
@@ -947,7 +1051,7 @@ class engine:
                 if bm and bm.get("def") != n.definition():
                     r["reason"] = "definition changed"
                 elif bm and n.kind != "plot" and (bm.get("code") != code_hash() or
-                                                  bm.get("script") != self.scripts(n.commands())):
+                                                  bm.get("script") != self.node_scripts(n)):
                     r["reason"] = "code changed"
                 elif bm and n.kind == "loop" and k is not None and bm.get("values") != self.iterations(n, keys):
                     r["reason"] = "values changed"
@@ -1107,6 +1211,9 @@ class engine:
                         res = await self.build_plot(n, keys, lambda line: log(i, line), procs)
                 elif n.kind == "loop":
                     res = await self.build_loop(n, keys, lambda line: log(i, line), procs)
+                elif n.kind == "block":
+                    async with self.sem:
+                        res = await self.build_block(n, keys, lambda line: log(i, line), procs)
                 else:
                     async with self.sem:
                         res = await self.build_step(n, keys, lambda line: log(i, line), procs)
@@ -1177,8 +1284,13 @@ class engine:
         return await self.execute(keys[n.id], base, [n.cmd], keys, log, procs,
                                   {"id": n.id, "command": " ".join(n.lines()), "def": n.definition()})
 
-    async def execute(self, key, base, cmds, keys, log, procs, meta):
-        # run cmds on a copy of base (None: none) and keep the result under key
+    async def build_block(self, n, keys, log, procs):
+        base = keys[n.parent] if n.parent else None
+        return await self.execute(keys[n.id], base, [], keys, log, procs,
+                                  {"id": n.id, "command": " ".join(n.lines()[:1]), "def": n.definition()}, block=n)
+
+    async def execute(self, key, base, cmds, keys, log, procs, meta, block=None):
+        # run cmds (or the script of block) on a copy of base (None: none) and keep the result under key
         tmp = os.path.join(self.work, "tmp", "%s-%d" % (key, os.getpid()))
         shutil.rmtree(tmp, ignore_errors=True)
         os.makedirs(tmp)
@@ -1211,10 +1323,20 @@ class engine:
                 lines += out_lines
                 if rc != 0:
                     raise FlowError("%s failed (exit code %d)" % (c.name, rc))
-            if not os.path.exists(out) or runner.file_hash(out) == before:
+            if block is not None:
+                env = {"DB": out}
+                for r in block.block["inputs"]:
+                    env[in_var(r)] = self.file_of(self.flow.nodes[r], keys[r], tmp)
+                rc, out_lines = await runner.execute_block(block.block["script"], env, self.flow.base, log, procs)
+                lines += out_lines
+                if rc != 0:
+                    raise FlowError("the block failed (exit code %d)" % rc)
+                if not os.path.exists(out):
+                    raise FlowError("the block wrote no database $DB")
+            elif not os.path.exists(out) or runner.file_hash(out) == before:
                 raise FlowError("%s wrote no database (did it print its usage?)" % cmds[-1].name)
             child = jks.resamples(out)
-            m = dict(meta, key=key, code=code_hash(), script=self.scripts(cmds),
+            m = dict(meta, key=key, code=code_hash(), script=self.node_scripts(block) if block else self.scripts(cmds),
                      created=str(datetime.datetime.now()), log="\n".join(lines))
             res.update(self.keep(key, base, child, m, out))
             res["ok"] = True

@@ -12,17 +12,19 @@ Run, inspect and edit a data flow: a bash file of `jks_*` steps whose results ar
     jks_flow list flow.sh id word ...
     jks_flow plot flow.sh id input out.pdf|- command ...
     jks_flow add flow.sh [VAR=value ...] id parent|- script argument ...
+    jks_flow block flow.sh id parent|- [-i id] [-f file] script.sh|-
     jks_flow rm flow.sh id
     jks_flow rebase flow.sh id parent
     jks_flow fmt flow.sh
     jks_flow du flow.sh
+    jks_flow import flow.sh mk
     jks_flow gc flow.sh [-n]
 
 ## Description
 
 A flow is a DAG of database states.  Each node is a source database, a list of
-words, a step (one `jks_*` call), a loop (steps repeated for a list of values) or a
-plot (a `jks_plot2` figure).  The flow file is a bash script, so `bash flow.sh`
+words, a step (one `jks_*` call), a loop (steps repeated for a list of values), a
+plot (a `jks_plot2` figure) or a block (a bash script, for what no jks script does).  The flow file is a bash script, so `bash flow.sh`
 replays every step without jks_flow; `jks_flow run` does the same incrementally.
 
 A node's result is cached under a key that hashes the script, the jks library, the
@@ -55,6 +57,25 @@ done
 jks_figure fig int jks_plot2 plots/int.pdf xr:16:40 c1:int.C:C c2:int.Crec:Crec
 ```
 
+A block is a here-document run with `bash -euo pipefail` in the flow's directory:
+
+```bash
+#@jks {"id": "refit", "files": ["guess.txt"]}
+jks_block refit fit lam <<'JKS'
+c=$(jks_info "$DB" C 1 | head -1 | awk '{print $1}')
+jks_add "$DB" guess "[$c, $(cat guess.txt)]"
+jks_add_from "$DB" "$IN_lam" lam lam2
+JKS
+```
+
+`$DB` is a copy of the database of the node after the id (`-`: the script creates
+`$DB`); what the script leaves in `$DB` is the block's database.  Further input nodes
+follow (`$IN_<id>`, other characters than letters, digits and `_` become `_`).  The
+flow cannot see inside a block: its key covers the script, its input nodes, the jks
+library and the `jks_*` scripts it names, and the files listed in `"files"` (globs
+allowed); declare every file it reads, or changes of it go unnoticed.  Files the
+script writes besides `$DB` are not tracked.  The script cannot contain a line `JKS`.
+
 `@` is the node's own database, `@id` the database of node `id` (only for input
 databases).  The word after the node id in `jks_step` is the node whose database is
 copied before the script runs (`-`: the script writes a new database).  Loops
@@ -78,11 +99,50 @@ only add tags run independently ("map"), others one after the other ("sequence")
 | `list id word ...` | add a list of words for loops |
 | `plot id input out.pdf\|- cmd ...` | add a `jks_plot2` figure of node `input`; `-` keeps it in the cache |
 | `add [VAR=value ...] id parent\|- script args` | add a step; the database the script writes must be `@` |
+| `block id parent\|- [-i id] [-f file] script.sh\|-` | add a block with the script from a file or stdin; `-i`: further input nodes, `-f`: files it reads |
 | `rm id` | remove a node that no other node reads |
 | `rebase id parent` | let a step or loop (and everything after it) start from another node |
 | `fmt` | rewrite the file in canonical form |
 | `du` | disk usage: per node its stored result (delta, full copy, snapshot of a source or figure; loops with their iterations) and its previous result, the work directory by part, and what `gc` would free |
+| `import mk` | write a new flow from an mk driver (see below); prints what was not imported and which node holds each database file at the end |
 | `gc [-n]` | delete stored results no current or last computed node needs, and temporary files of killed runs (`-n`: only report) |
+
+## Importing an mk driver
+
+`jks_flow import flow.sh mk` reads a bash driver of `jks_*` calls and follows every
+database file through it: a step on `data.jks` starts from the node that holds the
+current state of `data.jks` and becomes its new state.
+
+- `cp a.jks b.jks` and `mv` carry a state to another file; a database the driver
+  reads before writing it becomes a source node.  A file modified before the driver
+  creates it is also imported as a source, with its content at import time, and
+  reported (it may be the output of an earlier run).
+- Scripts writing a new database (`jks_take`, `jks_merge`, `jks_create_*`, ...) start
+  from `-`; other databases they read become `@id` (or stay file names).
+- `for` loops over words, `$(seq ...)`, nested loops and rows
+  (`read -r a b <<< "$row"`) become loop nodes when their body only calls `jks_*`
+  scripts on one database; a word list used by several loops becomes a list node.
+- Variables with a literal value (`T=40`, also inside strings) are substituted;
+  `export JKS_...` and `VAR=value jks_...` become the environment of the steps whose
+  scripts use the variable; `unset` ends it.  `export PATH=...` is not needed.
+- `jks_plot`/`jks_plot2` become plot nodes (inside loops they are skipped); scripts
+  that only print (`jks_info`, ...) and `echo`, `set`, `mkdir` are skipped.
+- Everything else (`if`, pipelines, other programs, `$(...)` outside loop values, a
+  loop body writing several databases, ...) becomes a block if it names exactly one
+  database file the driver works on: the name is replaced by `${DB}`, the variables
+  it uses are set at the top (exported ones exported), and the block is reported
+  for review; declare the files it reads.  A statement that names no database,
+  several, or one inside single quotes, and `cd`, are reported and kept in the flow
+  file as a comment where they were.  Nothing else is guessed.
+
+```bash
+jks_flow import ana.sh mk
+jks_flow run ana.sh
+```
+
+On the lqcd example: 6 nodes (source `C_sp`, steps `omega0`, `C.4.14`, `C.4.14.b`,
+loop `int`, plot `plot.data`); the database of `int` equals the `data.jks` that
+`bash mk` writes.
 
 ## Environment
 

@@ -51,6 +51,14 @@ for row in 'C 4' 'C2 6'; do
 done
 #@jks {"id": "fig"}
 jks_figure fig rows jks_plot2 - xr:0:20 c1:int.C:C c2:int.C2:C2
+#@jks {"id": "blk", "files": ["guess.txt"]}
+jks_block blk rows lam <<'JKS'
+# a start value from the data, as in an mk
+c=$(jks_info "$DB" C 1 | head -1 | awk '{print $1}')
+jks_add "$DB" guess "[$c, $(cat guess.txt)]" \
+  G2 "r['C'][2:4] * 2"
+jks_add_from "$DB" "$IN_lam" lam lam2
+JKS
 '''
 
 
@@ -60,6 +68,7 @@ def flow_cli(*args, check=True, cwd=None):
 
 def build(d, base):
     shutil.copyfile(base, os.path.join(d, "base.jks"))
+    open(os.path.join(d, "guess.txt"), "w").write("0.7\n")
     f = os.path.join(d, "ana.sh")
     flow_cli("source", f, "raw", "base.jks")
     flow_cli("add", f, "grid", "raw", "jks_add", "@", "omega1", "np.linspace(0.3, 2.0, 30)")
@@ -80,7 +89,7 @@ def db_nodes(f):
     return [i for i, n in fl.nodes.items() if n.has_db() and not n.is_source()]
 
 
-def assert_matches_bash(d, f):
+def assert_matches_bash(d, f, figure="fig"):
     # every node's database equals the one "bash flow.sh" writes
     work = os.path.join(d, "ana.work")
     shutil.rmtree(os.path.join(work, "files"), ignore_errors=True)
@@ -92,7 +101,8 @@ def assert_matches_bash(d, f):
         out = os.path.join(d, "export-%s.jks" % i)
         flow_cli("export", f, i, out)
         assert_same_db(out, os.path.join(work, "files", i + ".jks"))
-    assert os.path.getsize(os.path.join(work, "files", "fig.pdf")) > 1000
+    if figure:
+        assert os.path.getsize(os.path.join(work, "files", figure + ".pdf")) > 1000
 
 
 def status(f):
@@ -188,6 +198,24 @@ def test_input_change_is_only_flagged(flow):
     assert_matches_bash(d, f)
 
 
+def test_block(flow):
+    d, f = flow
+    flow_cli("export", f, "blk", os.path.join(d, "blk.jks"))
+    r = load(os.path.join(d, "blk.jks"))
+    assert r.get("guess").mean()[1] == 0.7 and r.get("lam2").mean()[0] == 0.5
+    assert r.get("guess").mean()[0] == pytest.approx(r.get("C").mean()[1], rel=1e-12)
+    # the file format round-trips (the here-document is kept as it is)
+    assert core.flow.load(f).text() == open(f).read()
+    # a declared file makes the block stale, and only the block
+    open(os.path.join(d, "guess.txt"), "w").write("0.8\n")
+    st = status(f)
+    assert st["blk"] == ("stale", "input changed") and st["rows"][0] == st["fig"][0] == "ok"
+    flow_cli("run", f)
+    assert_matches_bash(d, f)
+    os.remove(os.path.join(d, "guess.txt"))
+    assert status(f)["blk"][0] == "missing"
+
+
 def test_rebase(flow):
     d, f = flow
     flow_cli("rebase", f, "hlt", "lam")
@@ -235,3 +263,107 @@ def test_registry_round_trip(line):
 def test_registry_scripts_exist():
     for s in registry.SCRIPTS:
         assert os.path.exists(os.path.join(ROOT, "scripts", s.name)), s.name
+
+
+# ---- import of an mk driver ----
+MK = r'''#!/bin/bash
+# a driver as they are written by hand
+set -e
+T=24
+WIN="[4,6,8,10]"
+cp base.jks data.jks
+jks_add data.jks \
+	omega0b "np.linspace(0.3, 2.5, 40)" \
+	lam "[0.5, 0.25]" \
+
+export JKS_CORRELATION_STRENGTH=0.9
+export JKS_X=3
+jks_plsa data.jks C "$WIN" "list(range(12))" omega0 C.plsa
+unset JKS_CORRELATION_STRENGTH
+jks_plsa data.jks C2 "$WIN" "list(range(12))" omega0 C2.plsa
+jks_info data.jks C.plsa > info.txt
+for tag in C C2
+do
+    jks_add data.jks int.${tag} "[ r['$tag'][t] * t**2 for t in range($T) ]"
+    jks_plot2 int.${tag}.pdf data.jks "c1:int.${tag}:x"
+done
+for k in $(seq 1 2); do jks_rescale_variance data.jks C2 1.1; done
+for tag in C C2; do
+  for t in 3 5; do
+    jks_add data.jks x.${tag}.${t} "[ r['${tag}'][$t] ]"
+  done
+done
+for row in 'C 4' 'C2 6'; do
+  read -r tag t0 <<< "$row"
+  jks_add data.jks "y.${tag}" "[ r['${tag}'][${t0}] ]"
+done
+jks_take sub.jks data.jks 'int.*'
+cp sub.jks sub2.jks
+jks_add sub2.jks z "r['int.C'] * 2"
+jks_add_from data.jks sub2.jks z zz
+mv sub2.jks final.jks
+if [ -f nothing ]; then
+  echo no
+fi
+if [ -f data.jks ]; then
+  jks_add data.jks w "[ $T, $JKS_X ]"
+fi
+python3 -c 'import jks; print(len(jks.resamples("data.jks").keys()))'
+jks_plot2 all.pdf data.jks "c1:C:C" "c2:zz:zz"
+'''
+
+
+def test_import_mk(ensemble, tmp_path):
+    # the imported flow computes exactly the databases the driver writes
+    from jks.flow import mk
+    ran, imp = str(tmp_path / "ran"), str(tmp_path / "imp")
+    for d in (ran, imp):
+        os.makedirs(d)
+        shutil.copyfile(ensemble["db"], os.path.join(d, "base.jks"))
+        open(os.path.join(d, "mk"), "w").write(MK)
+    p = subprocess.run(["bash", "mk"], cwd=ran, env=env(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    assert p.returncode == 0, p.stdout[-3000:]
+    f = os.path.join(imp, "ana.sh")
+    out = flow_cli("import", f, os.path.join(imp, "mk")).stdout
+    fl, report, files, lists = mk.import_mk(os.path.join(imp, "mk"), os.path.join(imp, "other.sh"))
+    text = " ".join(t for _, t in report)
+    for what in ("jks_info: prints only", "jks_plot2 skipped", "if ... fi is not supported",
+                 "python3 is not a jks script; not a block either: the database name is inside single quotes",
+                 "imported as block block on data.jks"):
+        assert what in text, (what, text)
+    b = fl.nodes["block"]
+    assert b.parent == "zz" and b.block["script"].startswith("T=24\nexport JKS_X=3\n")
+    assert 'jks_add ${DB} w "[ $T, $JKS_X ]"' in b.block["script"]
+    assert lists == ["tags"] and fl.nodes["tags"].values == ["C", "C2"]
+    assert sorted(files) == ["base.jks", "data.jks", "final.jks", "sub.jks"]
+    assert fl.nodes["C.plsa"].cmd.env == {"JKS_CORRELATION_STRENGTH": "0.9"} and fl.nodes["C2.plsa"].cmd.env == {}
+    assert "#   python3 -c 'import jks" in open(f).read()  # kept as a comment to review
+    flow_cli("run", f, "-j", "2")
+    for path, i in files.items():
+        if path != "base.jks":
+            flow_cli("export", f, i, os.path.join(imp, "export.jks"))
+            assert_same_db(os.path.join(imp, "export.jks"), os.path.join(ran, path))
+    assert os.path.getsize(os.path.join(imp, "all.pdf")) > 1000
+    # the imported flow replays like any other
+    assert_matches_bash(imp, f, figure=None)
+
+
+LQCD = os.path.expanduser("~/SDP/positive_laplace/examples/lqcd")
+
+
+@pytest.mark.skipif(not os.path.exists(os.path.join(LQCD, "mk")), reason="needs the lqcd example")
+def test_import_lqcd_mk(tmp_path):
+    for d in ("ran", "imp"):
+        os.makedirs(str(tmp_path / d))
+        for f in ("mk", "C_sp.jks"):
+            shutil.copyfile(os.path.join(LQCD, f), str(tmp_path / d / f))
+    p = subprocess.run(["bash", "mk"], cwd=str(tmp_path / "ran"), env=env(), stdout=subprocess.PIPE,
+                       stderr=subprocess.STDOUT, text=True)
+    assert p.returncode == 0, p.stdout[-3000:]
+    f = str(tmp_path / "imp" / "ana.sh")
+    flow_cli("import", f, str(tmp_path / "imp" / "mk"))
+    flow_cli("run", f, "-j", "2")
+    node = [l.split()[-1] for l in flow_cli("import", str(tmp_path / "imp" / "x.sh"), str(tmp_path / "imp" / "mk"))
+            .stdout.split("\n") if l.strip().startswith("data.jks is node")][0]
+    flow_cli("export", f, node, str(tmp_path / "imp" / "out.jks"))
+    assert_same_db(str(tmp_path / "imp" / "out.jks"), str(tmp_path / "ran" / "data.jks"))
