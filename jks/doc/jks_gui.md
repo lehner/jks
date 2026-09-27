@@ -29,11 +29,16 @@ result and cleans up results no node needs (as `jks_flow gc`).  The selected nod
 toolbar shows the size of its result.  "Add block" adds a bash block after the
 selected node (script, further inputs, files it reads; see `jks_flow`).
 
+An **mk driver** (a bash script calling `jks_*` scripts, listed as "mk driver" in the
+open dialog) opens as an import page: "Import" writes a new flow file next to it
+(`mk.flow.sh`, as `jks_flow import`), shows what was imported and what not, and
+"Open the flow" opens it.  The driver itself is not changed.
+
 ## Arguments
 
 | argument | meaning |
 |---|---|
-| `file.jks`, `flow.sh` | databases or flows to offer; the first one is opened |
+| `file.jks`, `flow.sh`, `mk` | databases, flows or mk drivers to offer; the first one is opened |
 | `--host HOST` | interface to bind (default 127.0.0.1) |
 | `--port PORT` | port (default 8080) |
 | `--jobs N` | steps computed in parallel in flows (default 2) |

@@ -226,7 +226,9 @@ scripts/jks_flow       command line for flows (status, run, export, log, add, rm
   names in the text (`node_scripts`), declared `meta["files"]` (`block_files`, a
   missing file makes the node missing).  GUI: "Add block" / Edit open `edit_block`.
   The importer turns an unmapped statement naming exactly one database file into a
-  block (`importer.as_block`).
+  block (`importer.as_block`).  `mk.is_driver(path)` recognises drivers (a `#!` or
+  `.sh` script naming a jks script, not a flow); the file picker lists them as
+  "mk driver" and `/?file=` of a driver shows `app.import_page`.
 - mk import (`jks/flow/mk.py`, `jks_flow import flow.sh mk`): a bash lexer (quotes,
   escapes, continuations, comments, `$var`, `$(...)`) and a parser for simple commands
   and `for` loops; `importer.files` maps every database file to the node holding its

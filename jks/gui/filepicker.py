@@ -21,6 +21,7 @@
 import os
 from nicegui import ui
 from jks.flow import core
+from jks.flow import mk
 
 
 def _kind(e):
@@ -29,9 +30,11 @@ def _kind(e):
         return "database"
     try:
         with open(e.path, "rb") as f:
-            return "flow" if core.FORMAT.encode() in f.read(200) else ""
+            if core.FORMAT.encode() in f.read(200):
+                return "flow"
     except OSError:
         return ""
+    return "mk driver" if mk.is_driver(e.path) else ""
 
 
 def _size(n):
@@ -105,11 +108,14 @@ class file_picker(ui.dialog):
                 continue
             try:
                 is_dir = e.is_dir()
-                if not is_dir and not self.all.value and not e.name.endswith(self.pattern):
+                drivers = ".sh" in (self.pattern if isinstance(self.pattern, tuple) else (self.pattern,))
+                if not is_dir and not self.all.value and not e.name.endswith(self.pattern) and \
+                        not (drivers and "." not in e.name):
                     continue
                 kind = "folder" if is_dir else _kind(e)
-                # shell scripts only if they are flows
-                if e.name.endswith(".sh") and kind != "flow" and not self.all.value:
+                # shell scripts (and files without extension) only if they are flows or mk drivers
+                if not is_dir and (e.name.endswith(".sh") or "." not in e.name) and \
+                        kind not in ("flow", "mk driver") and not self.all.value:
                     continue
                 size = "" if is_dir else _size(e.stat().st_size)
             except OSError:

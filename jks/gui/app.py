@@ -244,8 +244,67 @@ def figure(key: str):
     return FileResponse(p, media_type="application/pdf")
 
 
+async def import_page(file):
+    # an mk driver: import it as a flow, show the report, open the flow
+    from jks.flow import mk
+    ui.dark_mode(False)
+    with ui.header().classes("items-center gap-2 py-1"):
+        ui.label("jks").classes("text-lg font-bold")
+        ui.label(file).classes("text-sm opacity-80 grow truncate")
+    stem = os.path.basename(file)[:-3] if file.endswith(".sh") else os.path.basename(file)
+    target = os.path.join(os.path.dirname(file), stem + ".flow.sh")
+    k = 2
+    while os.path.exists(target):
+        target, k = os.path.join(os.path.dirname(file), "%s.flow%d.sh" % (stem, k)), k + 1
+    with ui.column().classes("m-6 gap-3 w-[60rem] max-w-full"):
+        ui.label("%s is a bash script of jks_* calls, not a flow." % os.path.basename(file)).classes("text-lg")
+        ui.label("Importing writes a new flow file: every database file of the script becomes a chain of "
+                 "nodes, loops become loop nodes, statements that change one database become bash blocks. "
+                 "Everything else is reported and kept as a comment. The script itself is not changed.") \
+            .classes("text-sm opacity-80")
+        path = ui.input("new flow file", value=target).classes("w-full").style(MONO)
+        btn = ui.button("Import", icon="input")
+        out = ui.column().classes("w-full gap-2")
+
+        async def go():
+            p = os.path.abspath(os.path.expanduser(path.value))
+            out.clear()
+            if os.path.exists(p):
+                with out:
+                    ui.label("%s exists already" % p).classes("text-negative")
+                return
+            try:
+                fl, report, files, lists = await run.io_bound(mk.import_mk, file, p)
+                fl.save()
+            except (core.FlowError, mk.Unsupported, OSError) as e:
+                with out:
+                    ui.label("ERROR: %s" % e).classes("text-negative whitespace-pre-wrap")
+                return
+            remember(p)
+            btn.disable()
+            with out:
+                kinds = {}
+                for n in fl.nodes.values():
+                    kinds[n.kind] = kinds.get(n.kind, 0) + 1
+                ui.label("%s: %s" % (os.path.basename(p), ", ".join("%d %s%s" % (v, k, "s" if v > 1 else "")
+                                                                    for k, v in kinds.items()))).classes("font-bold")
+                if report:
+                    ui.table(columns=[{"name": "line", "label": "line", "field": "line", "align": "right"},
+                                      {"name": "text", "label": "what the import did", "field": "text", "align": "left"}],
+                             rows=[{"k": k, "line": l, "text": t} for k, (l, t) in enumerate(report)], row_key="k",
+                             pagination={"rowsPerPage": 0}).props("dense flat wrap-cells hide-bottom").classes("w-full")
+                ui.label("At the end of the script: " + ", ".join("%s is node %s" % (f, i) for f, i in sorted(files.items()))) \
+                    .classes("text-sm")
+                ui.button("Open the flow", icon="account_tree", on_click=lambda: ui.navigate.to(url(p)))
+        btn.on_click(go)
+
+
 @ui.page("/")
 async def index(file: str = ""):
+    from jks.flow import mk
+    if file and not flowview.is_flow(file) and mk.is_driver(file):
+        await import_page(os.path.abspath(file))
+        return
     if file and flowview.is_flow(file):
         try:
             p = flowview.flow_page(file, ui.dark_mode(False), inputs, jobs)

@@ -532,7 +532,7 @@ class importer:
             (os.path.basename(self.mk), s.line, why)],
             block={"script": "\n".join(pre + [text]) + "\n", "inputs": []}))
         self.files[p] = i
-        self.report.append((s.line, "imported as block %s on %s (%s): check it" % (i, os.path.relpath(p, self.dir), why)))
+        self.report.append((s.line, "imported as block node %s on %s (%s): check it" % (i, os.path.relpath(p, self.dir), why)))
         return i
 
     def export(self, s):
@@ -708,6 +708,19 @@ class importer:
                 l.pop("words")
                 l.update(kind="list", list=i)
         return list(made)
+
+
+def is_driver(path):
+    # a bash script calling jks scripts that is not a flow (an mk driver to import)
+    if path.endswith((".jks", "~")) or not os.path.isfile(path) or os.path.getsize(path) > 1 << 20:
+        return False
+    try:
+        with open(path, "rb") as f:
+            text = f.read(1 << 16).decode()
+    except (OSError, UnicodeDecodeError):
+        return False
+    return core.FORMAT not in text[:200] and (path.endswith(".sh") or text.startswith("#!")) and \
+        core.SCRIPT_NAME.search(text) is not None
 
 
 def _quote_state(text):

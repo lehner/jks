@@ -190,3 +190,27 @@ def test_add_block(ensemble, tmp_path, page):
     finally:
         g.stop()
     assert "Traceback" not in g.output()
+
+
+def test_import_mk_from_the_open_dialog(ensemble, tmp_path, page):
+    from test_flow import MK
+    d = str(tmp_path)
+    shutil.copyfile(ensemble["db"], os.path.join(d, "base.jks"))
+    open(os.path.join(d, "mk"), "w").write(MK)
+    g = gui(os.path.join(d, "base.jks"), d)
+    try:
+        page.goto(g.url)
+        page.locator("header button").filter(has=page.locator("i", has_text="folder_open")).click()
+        row = page.get_by_role("row").filter(has=page.get_by_role("cell", name="mk", exact=True))
+        row.wait_for(timeout=10000)
+        assert row.get_by_role("cell", name="mk driver", exact=True).count() == 1
+        row.click()
+        page.get_by_role("button", name="Import").click()
+        page.get_by_text("mk.flow.sh:").wait_for(timeout=15000)
+        assert page.get_by_text("imported as block node block on data.jks").count() == 1
+        page.get_by_role("button", name="Open the flow").click()
+        page.wait_for_selector("canvas", timeout=15000)
+        assert os.path.exists(os.path.join(d, "mk.flow.sh")) and page.errors == []
+    finally:
+        g.stop()
+    assert "Traceback" not in g.output()

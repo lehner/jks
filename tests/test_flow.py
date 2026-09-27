@@ -329,7 +329,7 @@ def test_import_mk(ensemble, tmp_path):
     text = " ".join(t for _, t in report)
     for what in ("jks_info: prints only", "jks_plot2 skipped", "if ... fi is not supported",
                  "python3 is not a jks script; not a block either: the database name is inside single quotes",
-                 "imported as block block on data.jks"):
+                 "imported as block node block on data.jks"):
         assert what in text, (what, text)
     b = fl.nodes["block"]
     assert b.parent == "zz" and b.block["script"].startswith("T=24\nexport JKS_X=3\n")
