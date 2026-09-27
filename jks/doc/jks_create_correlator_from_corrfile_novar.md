@@ -16,7 +16,8 @@ The difference to `jks_create_correlator_from_corrfile` is the configuration tag
 The file name is not parsed: the pattern need not contain a `*` or a number.  The
 files matching `patK` are sorted by name, and with `n` matching files the k-th file
 (k = 0..n-1) gets the tag `<etagK>-%08d` of `n + k`, i.e. the configuration numbers
-are `n` ... `2n-1` per pattern in sorted file order.  Every file is read once and
+are `n` ... `2n-1` per pattern in sorted file order.  Tags are in the order of the
+records in the first file.  Every file is read once and
 the statistics equal those of `jks_create_correlator_from_corrfile` on the same
 files.
 

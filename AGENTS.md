@@ -15,6 +15,7 @@ jks/                  library (imported as `jks`)
   bounded_laplace.py  two-sided box bounds (solver behind jks_blsa)
   hlt.py              Hansen-Lupo-Tantalo coefficients (behind jks_hlt, jks_hlt_kernel)
 scripts/              command-line tools, one file each, installed as-is by setup.py
+tests/                pytest suite (not installed; no __init__.py)
 setup.py              version and install_requires
 ```
 
@@ -275,6 +276,33 @@ scripts/jks_flow       command line for flows (status, run, export, log, add, rm
 
 ## Testing changes
 
+- Run the test suite before and after a change (about 50 s):
+
+  ```
+  python3 -m pytest tests                       # scripts and flows; GUI tests skipped
+  ~/.venvs/jks-gui/bin/python -m pytest tests   # also the GUI in headless chromium
+  ```
+
+  It needs no data outside the repository: `conftest.py` writes a synthetic 2x2
+  correlator matrix (two states, 24 configurations) as corrfiles and imports it with
+  `jks_create_correlator_from_corrfile`.  Scripts run from this checkout with a
+  clean `JKS_*` environment (`conftest.run`); `assert_same_db` compares databases
+  bit for bit (tags in order, configurations, variations, info, arrays).
+  - `test_scripts.py`: the fixed behaviours (importer tag order and read-only
+    inputs, `jks_rm`/`jks_take` edge cases, `jks_info` zeros, fit helpers of
+    `jks_add`, `jks_set_variance`, `jks_add_from`, gevp in==out, `jks_slow_fit` =
+    `jks_fit` errors, `!band`/`error_tag`, `jks_blsa` l=0,u=inf = `jks_plsa`,
+    `jks_plot` pages and exit status, `jks_plot_dist` odd N, `dump-corrs` flags).
+    Some compare against the committed script (`old_script`, from `git show HEAD`).
+  - `test_flow.py`: one flow with every node kind (steps with env, a new database,
+    side node, list, map/sequence/`jks_values`/rows loops, plot) must equal
+    `bash flow.sh` node by node, also after an edit, a changed input, a rebase and
+    `gc`; a stray `JKS_CORRELATION_STRENGTH` of the caller changes nothing.
+    Registry parse/build round trips.
+  - `test_gui.py` (needs nicegui and playwright with chromium): the token, a database
+    page with its tabs, a flow page with disk usage and the documentation dialog; no
+    page errors (except plotly's harmless resize of a hidden plot).
+- Add a test with every fix: it should fail before the fix.
 - Work on **copies** of databases (`cp ~/SDP/positive_laplace/examples/fake.jks
   $SCRATCH/`); every tool writes into the file it is given.
 - Reference examples: `~/SDP/positive_laplace/examples/fake.jks` (4-state synthetic,

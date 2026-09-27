@@ -47,7 +47,7 @@ file, the last record wins.
 ## Output
 
 Prints `Loading <file>` / `Done` per file.  Writes `fn` with tags `<T>.r` and `<T>.i`
-and configurations `<etag>-%08d`.  If no file matches any pattern, prints
+(in the order of the records in the first file) and configurations `<etag>-%08d`.  If no file matches any pattern, prints
 `Attention: no file loaded for [...]` and exits with status 1 without writing.
 
 ## Examples
