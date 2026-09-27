@@ -152,6 +152,12 @@ scripts/jks_gui        launcher
   `JKS_*` variable except the step's own.  Results are bit-identical to the same command
   run by hand (tested for jks_add, jks_plsa with and without JKS_CORRELATION_STRENGTH,
   jks_rescale_variance, jks_rm, jks_take).
+- Fit overlay (`stats.fit_band`): jks_fit stores per range j the parameters, plus
+  [p-value, chi2, dof, npar] with JKS_PVAL (detected from the data), and the fitted data
+  as `<fit>.<tag>.input.<j>`.  Default band: f evaluated per jackknife block and variation;
+  "linear" reproduces jks_plot2 / `jks.write_confidence_band` (to 2e-8).  The function
+  comes from the cached jks_fit step (`runner.find_fit`).  Multi-range fits need
+  `[ list(range(a,b)) for ... ]`; a plain range object is not recognized by jks_fit.
 - Cache key: script file hash, argv with the output database as a placeholder, env,
   content hash of every database read, size/mtime of glob-matched files.
 

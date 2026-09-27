@@ -52,6 +52,10 @@ def _figure(fig):
     return d
 
 
+def _rgba(c, a):
+    return "rgba(%d,%d,%d,%.3f)" % (int(c[1:3], 16), int(c[3:5], 16), int(c[5:7], 16), a)
+
+
 def _nz(y):
     # zeros and non-finite values become gaps on log axes
     y = np.array(y, dtype=np.float64)
@@ -68,9 +72,11 @@ def _human(m, errs, etags):
 
 
 class database_view:
-    def __init__(self, db, dark, diff=None, ref=None):
+    def __init__(self, db, dark, diff=None, ref=None, fit_source=None):
         # diff, ref: preview of a step, compared with the database ref
+        # fit_source: fit tag -> step that wrote it (functions of the fit), or None
         self.db = db
+        self.fit_source = fit_source
         self.dark = dark
         self.diff, self.ref = diff, ref
         self.change = {}
@@ -139,6 +145,7 @@ class database_view:
                             self.dodge = ui.checkbox("offset tags in x", value=False, on_change=self.update_plot)
                             ui.label("error bars as jks_plot2: inner statistical, outer stat and sys in quadrature"
                                      ).classes("text-xs opacity-70")
+                        self.build_fit_overlay()
                         self.plot = ui.plotly(go.Figure()).classes("w-full h-[65vh]")
                     with ui.tab_panel(t_table):
                         self.values = ui.table(columns=[], rows=[], row_key="t", pagination={"rowsPerPage": 0}) \
@@ -163,6 +170,112 @@ class database_view:
             self.set_selected(first)
         else:
             self.update_all()
+
+    def build_fit_overlay(self):
+        fits = stats.fit_tags(self.db.keys())
+        with ui.expansion("fit overlay", icon="show_chart").classes("w-full").props("dense") as exp:
+            with ui.row().classes("w-full items-center gap-2"):
+                self.fit_sel = ui.select(["(none)"] + fits, value="(none)", label="fit",
+                                         on_change=self.on_fit).props("dense").classes("w-40")
+                self.fit_tag = ui.select([], label="data tag", on_change=self.on_fit_tag).props("dense").classes("w-40")
+                self.fit_range = ui.select({}, label="range", on_change=self.update_plot).props("dense").classes("w-40")
+                self.fit_method = ui.select({"jackknife": "jackknife per block", "linear": "linear (jks_plot2)"},
+                                            value="jackknife", label="band",
+                                            on_change=self.update_plot).props("dense").classes("w-48")
+                self.fit_nested = ui.checkbox("stat band inside total band", value=True, on_change=self.update_plot)
+            self.fit_src = ui.input("fit function of x, p, r (Enter to apply)").props("dense").classes("w-full") \
+                .style("font-family: ui-monospace, monospace")
+            self.fit_src.on("keydown.enter", self.update_plot)
+            self.fit_src.on("blur", self.update_plot)
+            self.fit_info = ui.label().classes("text-xs whitespace-pre-wrap")
+        exp.set_visibility(bool(fits))
+
+    def on_fit(self, e=None):
+        fit = self.fit_sel.value
+        if fit == "(none)":
+            self.fit_tag.options, self.fit_tag.value = [], None
+            self.fit_tag.update()
+            self.update_plot()
+            return
+        tags = list(stats.fit_inputs(self.db.keys(), fit))
+        self.fit_tag.options = tags
+        self.fit_tag.value = tags[0] if self.fit_tag.value not in tags else self.fit_tag.value
+        self.fit_tag.update()
+        self.on_fit_tag()
+
+    def on_fit_tag(self, e=None):
+        fit, tag = self.fit_sel.value, self.fit_tag.value
+        if fit == "(none)" or tag is None:
+            return
+        js = stats.fit_inputs(self.db.keys(), fit)[tag]
+        opts = {}
+        for j in js:
+            x = np.flatnonzero(np.isfinite(np.asarray(self.db.res.get("%s.%s.input.%d" % (fit, tag, j)).orig, dtype=np.float64)))
+            opts[j] = "%d: t = %d..%d" % (j, x.min(), x.max()) if len(x) else str(j)
+        self.fit_range.options = opts
+        self.fit_range.value = js[0] if self.fit_range.value not in js else self.fit_range.value
+        self.fit_range.update()
+        src = self.fit_source(fit) if self.fit_source else None
+        self.fit_origin = src["command"] if src and tag in src["functions"] else None
+        if src and tag in src["functions"]:
+            self.fit_src.value = src["functions"][tag]
+        if tag not in self.selected:
+            self.table.selected = [r for r in self.table.rows if r["tag"] in self.selected + [tag]]
+            self.set_selected(self.selected + [tag])
+        else:
+            self.update_plot()
+
+    def plot_fit(self, fig):
+        fit, tag, j = self.fit_sel.value, self.fit_tag.value, self.fit_range.value
+        src = (self.fit_src.value or "").strip()
+        if fit == "(none)" or tag is None or j is None:
+            self.fit_info.text = ""
+            return
+        if not src:
+            self.fit_info.text = "type the fit function (the step that wrote %s is not known)" % fit
+            return
+        js = stats.fit_inputs(self.db.keys(), fit)[tag]
+        meff = self.quantity == "meff"
+        n = len(np.atleast_1d(self.db.res.get(tag).orig)) - (1 if meff else 0)
+        xs = np.linspace(0, n - 1, min(600, 10 * (n - 1) + 1))
+        try:
+            y, st, tot = stats.fit_band(self.db.res, fit, src, len(js), j, xs, self.convention,
+                                        self.fit_method.value, meff=meff)
+            P, pval = stats.fit_parameters(self.db.res, fit, len(js), j)
+        except Exception as e:
+            self.fit_info.text = "ERROR: %s" % e
+            return
+        if self.quantity == "abs":
+            y = np.abs(y)
+        # fitted range from the .input tag; m_eff(t) needs t and t+1
+        x = np.flatnonzero(np.isfinite(np.asarray(self.db.res.get("%s.%s.input.%d" % (fit, tag, j)).orig, dtype=np.float64)))
+        x0, x1 = (x.min(), x.max() - (1 if meff else 0)) if len(x) else (0, n - 1)
+        c = self.color(tag)
+        segments = [((xs >= x0) & (xs <= x1), 1.0, "solid"), (xs <= x0, 0.4, "dash"), (xs >= x1, 0.4, "dash")]
+        name = "fit %s, range %s" % (fit, self.fit_range.options.get(j, j))
+        for mask, a, dash in segments:
+            if mask.sum() < 2:
+                continue
+            bands = [(tot, 0.18), (st, 0.35)] if self.fit_nested.value else [(tot, 0.25)]
+            for e, alpha in bands:
+                fig.add_trace(go.Scatter(
+                    x=np.concatenate([xs[mask], xs[mask][::-1]]), y=np.concatenate([(y + e)[mask], (y - e)[mask][::-1]]),
+                    fill="toself", fillcolor=_rgba(c, alpha * a), line=dict(width=0), hoverinfo="skip",
+                    showlegend=False, legendgroup=name))
+            fig.add_trace(go.Scatter(
+                x=xs[mask], y=y[mask], mode="lines", line=dict(width=2, color=c, dash=dash), opacity=a if a < 1 else 1,
+                name=name, legendgroup=name, showlegend=dash == "solid",
+                customdata=np.stack([st[mask], tot[mask]], 1),
+                hovertemplate="x=%{x:.2f}: %{y:.8g}<br>stat %{customdata[0]:.3g}<br>total %{customdata[1]:.3g}<extra>fit</extra>"))
+        npar = P.shape[1] - (4 if pval else 0)
+        ps = stats.tag_stats(P[0, :npar], P[1:, :npar], self.db.tags, self.convention)
+        pe = ps.tot_err()
+        lines = ["p = [%s]" % ", ".join(_human(m, {"": e}, [""]) for m, e in zip(ps.mean, pe))]
+        if pval:
+            lines.append("chi2/dof = %.4g/%d, p-value %.3g" % (P[0, -3], int(P[0, -2]), P[0, -4]))
+        lines.append("function from: %s" % self.fit_origin if getattr(self, "fit_origin", None) else
+                     "function entered here (the step that wrote %s is not known)" % fit)
+        self.fit_info.text = "\n".join(lines)
 
     def build_overview(self):
         db = self.db
@@ -305,6 +418,8 @@ class database_view:
                     error_y=dict(type="data", array=st, visible=True, thickness=0.75, width=5, color=c)))
                 if self.change.get(tag) == "modified" and self.ref is not None:
                     self.plot_before(fig, tag, x, c)
+            if self.quantity in ("value", "abs", "meff"):
+                self.plot_fit(fig)
             if not self.selected:
                 fig.update_layout(**self.layout(
                     xaxis=dict(visible=False), yaxis=dict(visible=False),

@@ -301,3 +301,25 @@ def diff(ref, res):
             pass
     d["nonfinite"] = bad
     return d
+
+
+def find_fit(w, fit):
+    # most recent cached jks_fit/jks_slow_fit step writing the tag fit -> {data tag: function}, ranges, env
+    best = None
+    for p in glob.glob(os.path.join(w.root, "nodes", "*.json")):
+        try:
+            with open(p) as f:
+                m = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if m.get("name") not in ("jks_fit", "jks_slow_fit") or not m.get("ok"):
+            continue
+        spec = registry.BY_NAME[m["name"]]
+        v = spec.parse(m["argv"])
+        if v["tail"][1] == fit and (best is None or m["created"] > best[0]["created"]):
+            best = (m, v)
+    if best is None:
+        return None
+    m, v = best
+    return {"functions": dict((r[0], r[2]) for r in v["repeat"]), "ranges": dict((r[0], r[1]) for r in v["repeat"]),
+            "env": m["env"], "command": m["command"]}

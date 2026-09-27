@@ -23,7 +23,7 @@
 #   "cov":  sum_b (b - <b>)^2, the convention of jk.cov() used by downstream fits
 # A variation v contributes d d^T with d = block_v - mean in both conventions.
 #
-import fnmatch
+import fnmatch, re
 import numpy as np
 
 CONVENTIONS = ("info", "cov")
@@ -114,3 +114,78 @@ def match(keys, pattern):
     if not any(c in pattern for c in "*?["):
         pattern = "*" + pattern + "*"
     return [k for k in keys if fnmatch.fnmatchcase(k, pattern)]
+
+
+# ---- fit bands ----
+#
+# jks_fit stores for every fit range j the parameters p, followed by
+# [p-value, chi2, dof, npar] if JKS_PVAL was set, and the fitted data as
+# <fit>.<tag>.input.<j> (nan outside the range).
+
+
+def fit_inputs(keys, fit):
+    # data tag -> sorted range indices, from the .input tags of a fit
+    out = {}
+    for k in keys:
+        if k.startswith(fit + ".") and ".input." in k:
+            tag, j = k[len(fit) + 1 :].rsplit(".input.", 1)
+            if j.isdigit():
+                out.setdefault(tag, []).append(int(j))
+    return dict((t, sorted(js)) for t, js in out.items())
+
+
+def fit_tags(keys):
+    keys = list(keys)
+    return [k for k in keys if fit_inputs(keys, k)]
+
+
+def fit_parameters(res, fit, nranges, j):
+    # samples (central value first, then all blocks) of range j, and whether
+    # the last four entries are p-value, chi2, dof, npar
+    jk = res.get(fit)
+    P = np.vstack([np.atleast_1d(np.asarray(jk.orig, dtype=np.float64))] +
+                  [np.atleast_1d(np.asarray(b, dtype=np.float64)) for b in jk.blocks])
+    stride = P.shape[1] // nranges
+    assert stride * nranges == P.shape[1], "fit %s: %d numbers do not split into %d ranges" % (fit, P.shape[1], nranges)
+    P = P[:, j * stride : (j + 1) * stride]
+    tail = P[:, -4:] if stride >= 5 else None
+    pval = tail is not None and np.all(tail == tail[0]) and tail[0, 3] == int(tail[0, 3]) and \
+        0 < tail[0, 3] <= stride - 4 and tail[0, 2] == int(tail[0, 2]) and 0.0 <= tail[0, 0] <= 1.0
+    return P, bool(pval)
+
+
+def fit_function(src):
+    # same signature and names as in jks_fit
+    import math
+    return eval("lambda x,p,r: " + src, {"math": math, "np": np, "numpy": np})
+
+
+def fit_band(res, fit, src, nranges, j, xs, convention="cov", method="jackknife", meff=False):
+    # f(x) on the grid xs with statistical and total errors
+    #   jackknife: f evaluated with every block's parameters (and r[tag] of that block)
+    #   linear:    as jks.write_confidence_band, g^T C g with forward differences (eps = 1e-8)
+    # meff: log(f(x)/f(x+1)) instead of f(x)
+    f = fit_function(src)
+    g = (lambda x, p, r: np.log(f(x, p, r) / f(x + 1, p, r))) if meff else f
+    P, pval = fit_parameters(res, fit, nranges, j)
+    rt = sorted(set(re.findall(r"""r\[\s*['"]([^'"]+)['"]\s*\]""", src)))
+    R = [dict((t, np.asarray(res.get(t).orig if s == 0 else res.get(t).blocks[s - 1])) for t in rt)
+         for s in range(len(P))]
+    xs = np.asarray(xs, dtype=np.float64)
+    with np.errstate(all="ignore"):
+        if method == "jackknife":
+            Y = np.array([[g(x, P[s], R[s]) for x in xs] for s in range(len(P))], dtype=np.float64)
+            s = tag_stats(Y[0], Y[1:], res.tags, convention)
+            return s.mean, s.stat_err(), s.tot_err()
+        assert method == "linear"
+        npar = P.shape[1] - (4 if pval else 0)
+        ps = tag_stats(P[0, :npar], P[1:, :npar], res.tags, convention)
+        eps = 1e-8
+        y = np.array([g(x, P[0], R[0]) for x in xs], dtype=np.float64)
+        G = np.zeros((len(xs), npar))
+        for i in range(npar):
+            p = P[0].copy()
+            p[i] += eps
+            G[:, i] = (np.array([g(x, p, R[0]) for x in xs]) - y) / eps
+        err = lambda C: np.sqrt(np.einsum("ki,ij,kj->k", G, C, G))
+        return y, err(ps.cov("stat")), err(ps.cov("total"))

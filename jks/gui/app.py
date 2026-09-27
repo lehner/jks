@@ -138,7 +138,7 @@ class db_page:
         if self.db is None:
             return
         with self.body:
-            self.view = database_view(self.db, self.dark)
+            self.view = database_view(self.db, self.dark, fit_source=self.fit_source)
 
     def show_preview(self, panel):
         m, d, child, ref = panel.result
@@ -149,7 +149,7 @@ class db_page:
                 ui.label("PREVIEW").classes("font-bold")
                 ui.label(m["command"]).classes("grow truncate text-xs").style(MONO)
                 panel.commit_controls()
-            self.view = database_view(child, self.dark, diff=d, ref=ref)
+            self.view = database_view(child, self.dark, diff=d, ref=ref, fit_source=self.fit_source)
 
     async def after_commit(self, path):
         if self.db is not None and path == self.db.path:
@@ -163,6 +163,9 @@ class db_page:
                     ui.button("Open it", on_click=lambda: ui.navigate.to(url(path)))
                     ui.button("Stay", on_click=dlg.close).props("flat")
             dlg.open()
+
+    def fit_source(self, fit):
+        return runner.find_fit(self.work, fit)
 
     def check_disk(self):
         if self.db is not None and self.db.changed_on_disk():
