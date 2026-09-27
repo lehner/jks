@@ -1,0 +1,160 @@
+#!/usr/bin/env python3
+#
+#    JKS - Measurement database system
+#    Copyright (C) 2026  Christoph Lehner (christoph.lehner@ur.de, https://github.com/lehner/jks)
+#
+#    This program is free software; you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation; either version 2 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License along
+#    with this program; if not, write to the Free Software Foundation, Inc.,
+#    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+#
+import jks, sys, os, asyncio
+from jks.gui import flow
+
+usage = """%s command flow.sh [...]
+
+  status flow.sh                     state of every node
+  run flow.sh [-j N] [-f] [id ...]   compute the nodes (default: all) and what they need;
+                                     -j: parallel steps, -f: recompute the given nodes
+  export flow.sh id out.jks          write the database of a node
+  log flow.sh id                     output of the step that computed a node
+  source flow.sh id path             add a source database
+  add flow.sh id parent script args  add a step; parent - for scripts that write a new
+                                     database; @ is the node's database, @id another node's
+  rm flow.sh id                      remove a node nobody reads
+  fmt flow.sh                        rewrite the file in canonical form
+  gc flow.sh [-n]                    delete stored results no node needs (-n: only report)
+
+The flow file is a bash script; "bash flow.sh" replays it without the cache.""" % sys.argv[0]
+
+if len(sys.argv) < 3 or sys.argv[1] not in ("status", "run", "export", "log", "source", "add", "rm", "fmt", "gc"):
+    print(usage)
+    sys.exit(0)
+
+cmd, fn, args = sys.argv[1], sys.argv[2], sys.argv[3:]
+
+
+def fail(msg):
+    print("ERROR: %s" % msg)
+    sys.exit(1)
+
+
+def size(n):
+    for u in ["B", "KB", "MB", "GB"]:
+        if n < 1024 or u == "GB":
+            return "%.0f %s" % (n, u) if u == "B" else "%.1f %s" % (n, u)
+        n /= 1024.0
+
+
+try:
+    if cmd in ("source", "add") and not os.path.exists(fn):
+        fl = flow.flow(fn)
+    else:
+        fl = flow.flow.load(fn)
+    en = flow.engine(fl)
+
+    if cmd == "status":
+        for r in en.status():
+            n = fl.nodes[r["id"]]
+            what = "source %s" % n.source if n.is_source() else " ".join(
+                ["%s=%s" % kv for kv in sorted(n.env.items())] + [n.name] + [flow.registry.quote(x) for x in n.argv])
+            print("%-16s %-8s %-20s %s" % (r["id"], r["status"], r["reason"][:20], what[:100]))
+
+    elif cmd == "run":
+        jobs, force, ids = 1, False, []
+        i = 0
+        while i < len(args):
+            if args[i] == "-j":
+                jobs = int(args[i + 1])
+                i += 2
+                continue
+            if args[i] == "-f":
+                force = True
+            else:
+                ids.append(args[i])
+            i += 1
+        for i in ids:
+            if i not in fl.nodes:
+                fail("no node %s" % i)
+        verbose = os.environ.get("JKS_FLOW_VERBOSE")
+        res = asyncio.run(en.run(ids or None, jobs=jobs, force=force,
+                                 log=lambda i, line: print("  %s| %s" % (i, line)) if verbose else None))
+        bad = 0
+        for i in fl.nodes:
+            if i in res:
+                r = res[i]
+                if r["ok"]:
+                    print("%-16s done in %.2fs, stored %s (%s)" % (i, r["seconds"], r["stored"], size(r["bytes"])))
+                else:
+                    bad += 1
+                    print("%-16s FAILED: %s" % (i, r["error"]))
+                    for line in r.get("log", "").splitlines()[-5:]:
+                        print("  %s| %s" % (i, line))
+        if not res:
+            print("nothing to do")
+        if bad:
+            sys.exit(1)
+
+    elif cmd == "export":
+        if len(args) != 2:
+            fail("export flow.sh id out.jks")
+        en.export(args[0], args[1])
+
+    elif cmd == "log":
+        if len(args) != 1 or args[0] not in fl.nodes:
+            fail("log flow.sh id")
+        k = en.keys()[args[0]]
+        st = en._read_json("state.json")
+        f = st.get("failed", {}).get(args[0], {})
+        m = en.meta(k) if k else None
+        if m is None and f.get("key") == k:
+            print("# failed: %s" % f["error"])
+            print(f.get("log", ""))
+        else:
+            m = m or en.meta(st.get("built", {}).get(args[0], "") or "")
+            if m is None:
+                fail("%s has no stored result" % args[0])
+            print("# %s  (%s)" % (m["command"], m["created"]))
+            print(m.get("log", ""))
+
+    elif cmd == "source":
+        if len(args) != 2:
+            fail("source flow.sh id path")
+        fl.add(flow.node(args[0], source=args[1]))
+        fl.save()
+
+    elif cmd == "add":
+        if len(args) < 4:
+            fail("add flow.sh id parent script args")
+        env = {}
+        while args and "=" in args[0] and args[0].split("=")[0].isidentifier():
+            k, v = args.pop(0).split("=", 1)
+            env[k] = v
+        fl.add(flow.node(args[0], None if args[1] == "-" else args[1], os.path.basename(args[2]), args[3:], env))
+        fl.save()
+
+    elif cmd == "rm":
+        if len(args) != 1:
+            fail("rm flow.sh id")
+        fl.remove(args[0])
+        fl.save()
+
+    elif cmd == "fmt":
+        fl.save()
+
+    elif cmd == "gc":
+        dry = "-n" in args
+        n = en.gc(dry=dry)
+        print("%s %s" % ("would free" if dry else "freed", size(n)))
+
+except flow.FlowError as e:
+    fail(e)

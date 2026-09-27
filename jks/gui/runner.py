@@ -68,6 +68,30 @@ def clean_env(env):
     return e
 
 
+async def execute(name, argv, env, cwd, log=lambda line: None, procs=None):
+    # run a jks script with the step's environment -> (exit code, output lines)
+    cmd = [sys.executable, registry.script_path(name)] + list(argv)
+    lines = []
+    proc = await asyncio.create_subprocess_exec(*cmd, cwd=cwd, env=clean_env(env),
+                                                stdout=asyncio.subprocess.PIPE,
+                                                stderr=asyncio.subprocess.STDOUT)
+    if procs is not None:
+        procs.append(proc)
+    try:
+        while True:
+            b = await proc.stdout.readline()
+            if not b:
+                break
+            line = b.decode(errors="replace").rstrip("\n")
+            lines.append(line)
+            log(line)
+        rc = await proc.wait()
+    finally:
+        if procs is not None and proc in procs:
+            procs.remove(proc)
+    return rc, lines
+
+
 class step:
     def __init__(self, name, argv, env=None, base=None):
         self.name, self.argv, self.env = name, list(argv), dict(env or {})
@@ -184,26 +208,8 @@ class work:
             clone(st.parent(), out)
         before = file_hash(out) if os.path.exists(out) else None
         argv = st.spec.build(st.spec.set_primary(st.values, out))
-        cmd = [sys.executable, registry.script_path(st.name)] + argv
         t0 = time.time()
-        lines = []
-        proc = await asyncio.create_subprocess_exec(*cmd, cwd=st.base, env=clean_env(st.env),
-                                                    stdout=asyncio.subprocess.PIPE,
-                                                    stderr=asyncio.subprocess.STDOUT)
-        if procs is not None:
-            procs.append(proc)
-        try:
-            while True:
-                b = await proc.stdout.readline()
-                if not b:
-                    break
-                line = b.decode(errors="replace").rstrip("\n")
-                lines.append(line)
-                log(line)
-            rc = await proc.wait()
-        finally:
-            if procs is not None and proc in procs:
-                procs.remove(proc)
+        rc, lines = await execute(st.name, argv, st.env, st.base, log, procs)
         m = {"key": key, "name": st.name, "argv": st.argv, "env": st.env, "base": st.base,
              "command": st.command(), "inputs": inputs, "returncode": rc,
              "seconds": round(time.time() - t0, 3), "created": str(datetime.datetime.now()),

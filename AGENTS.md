@@ -143,9 +143,33 @@ jks/gui/runner.py      runs one step on a copy in the work directory, content-ha
 jks/gui/step.py        step panel: form from the registry, pasted commands, preview, commit
 jks/gui/history.py     recently used field values (20 per "script:argument", "env:VAR",
                        "command"), ~/.config/jks_gui/history.json, merged on every save
+jks/gui/flow.py        flows: DAG of steps in a bash file (parse/write), engine with keys,
+                       status, delta store, parallel runs, export, gc (no GUI imports)
 jks/gui/app.py         page, command line, access-token middleware
 scripts/jks_gui        launcher
+scripts/jks_flow       command line for flows (status, run, export, log, add, rm, fmt, gc)
 ```
+
+### Flows (`jks_flow`)
+
+- Format: one `#@jks {json}` line + one command per node, nodes after their inputs.
+  `jks_source id path` or `[VAR=x] jks_step id parent|- script argv`, with `@` = the
+  node's own database and `@id` = another node's (only for `db_in` arguments).  Other
+  comment lines are kept with the next node; `fmt` joins continuation lines.  The
+  generated header defines the helpers, so `bash flow.sh` replays the flow into
+  `<flow>.work/files/` (bash 3.2 syntax for macOS; untested there so far) and unsets
+  `JKS_*`, `BIN`, `STATS_KEEP_FIXED` like the engine.
+- Keys (Merkle): script file hash, definition (script, parent, argv, env), keys of the
+  inputs, content hash of sources and external databases, size/mtime of glob files.
+  Status: ok / stale (an older result exists; "definition changed" or "input changed") /
+  new / failed / missing.  Nothing runs until `jks_flow run`.
+- Store (`<flow>.work/store/`): children of sources and scripts writing a new database
+  are stored in full; others as a delta (changed tags + block-tag list, info, order)
+  against the parent, kept only if `apply_delta` reproduces the output exactly and the
+  delta has < 50% of the tags; a full copy after 7 deltas in a row.  Tested bit-identical
+  to `bash flow.sh` for every node (lqcd example incl. plsa/blsa/fit/take and a
+  JKS_CORRELATION_STRENGTH branch).  180 MB database, 6 steps: 173 MB store.
+- Files are written with `flow._write` (resamples format, no `os.getlogin`).
 
 - A script that is not in `registry.SCRIPTS` cannot be run from the GUI; add an entry
   when adding a script.  Deprecated (python 2, `jks_op`) scripts are left out.
