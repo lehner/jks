@@ -49,8 +49,11 @@ class arg:
 
 class script:
     def __init__(self, name, group, help, head=(), repeat=(), tail=(), optional=(),
-                 env=(), produces=None):
+                 env=(), produces=None, appends=False):
+        # appends: only adds new tags (no new variations, info unchanged), so loop
+        # iterations over it may run independently
         self.name, self.group, self.help = name, group, help
+        self.appends = appends
         self.head, self.repeat, self.tail = list(head), list(repeat), list(tail)
         self.optional = list(optional)
         assert not (self.repeat and self.optional)
@@ -177,7 +180,8 @@ def _gevp_produces(v):
 SCRIPTS = [
     script("jks_add", "build", "Add tags computed by python expressions of r[tag] (evaluated on every block).",
            head=[A("database", "db")],
-           repeat=[A("tag", "tag_out"), A("expression", "expr", "e.g. [ r['C'][t] * t**4 for t in range(40) ]")]),
+           repeat=[A("tag", "tag_out"), A("expression", "expr", "e.g. [ r['C'][t] * t**4 for t in range(40) ]")],
+           appends=True),
     script("jks_add_from", "import", "Copy tags from another database (renaming them); compresses the result.",
            head=[A("database", "db_maybe"), A("from", "db_in")],
            repeat=[A("tag_in", "str", "tag in the other database"), A("tag_as", "tag_out")]),
@@ -196,7 +200,7 @@ SCRIPTS = [
     script("jks_correlator_reconstruct", "build", "Reconstruct a correlator from energies and overlaps.",
            head=[A("database", "db"), A("out_tag", "str", "results are stored as out_tag.recN"),
                  A("energy_tag", "tag_in"), A("c2_tag", "tag_in"), A("Tmax", "int")],
-           produces=lambda v: [v["head"][1] + ".rec*"]),
+           produces=lambda v: [v["head"][1] + ".rec*"], appends=True),
     script("jks_model_average", "fit", "Model average of fit results.",
            head=[A("database", "db")], repeat=[A("model", "tag_in")],
            tail=[A("index", "int"), A("weight", "str", "aic, chi2 or flat", default="aic"),
@@ -206,12 +210,12 @@ SCRIPTS = [
            repeat=[A("tag", "tag_in"), A("ranges", "value", "e.g. range(5,20), or several ranges: [ list(range(i,20)) for i in range(3,8) ]"),
                    A("function", "expr", "of x, p, r, e.g. p[0]*math.exp(-p[1]*x)")],
            tail=[A("guess", "value", "e.g. [1.0,0.5]"), A("fit_tag", "tag_out")],
-           env=_fit_env, produces=_fit_produces),
+           env=_fit_env, produces=_fit_produces, appends=True),
     script("jks_slow_fit", "fit", "Like jks_fit with a slower, more robust minimizer.",
            head=[A("database", "db")],
            repeat=[A("tag", "tag_in"), A("ranges", "value"), A("function", "expr", "of x, p, r")],
            tail=[A("guess", "value"), A("fit_tag", "tag_out")],
-           env=_fit_env[:1], produces=_fit_produces),
+           env=_fit_env[:1], produces=_fit_produces, appends=True),
     script("jks_plsa", "spectral", "Positivity band of int rho w_out given the inputs (stat blocks + !band).",
            head=_spectral_in + [A("tag_out", "tag_out")], optional=[A("dchi2", "float", default="1")],
            env=[_strength]),
@@ -220,10 +224,10 @@ SCRIPTS = [
            optional=[A("dchi2", "float", default="1")], env=[_strength]),
     script("jks_hlt", "spectral", "Hansen-Lupo-Tantalo linear estimate g.C (statistical error only).",
            head=_spectral_in + [A("tag_out", "tag_out"), A("lambda", "float")],
-           optional=[A("alpha", "float", default="0"), A("p", "float", default="0")], env=[_strength]),
+           optional=[A("alpha", "float", default="0"), A("p", "float", default="0")], env=[_strength], appends=True),
     script("jks_hlt_kernel", "spectral", "HLT kernels kbar on the grid, one tag per output weight.",
            head=_spectral_in + [A("tags_out", "tags_out", "e.g. ['k6','k8']"), A("lambda", "float")],
-           optional=[A("alpha", "float", default="0"), A("p", "float", default="0")], env=[_strength]),
+           optional=[A("alpha", "float", default="0"), A("p", "float", default="0")], env=[_strength], appends=True),
     script("jks_gevp_2pt", "fit", "GEVP of a correlator matrix; writes a new database.",
            head=[A("out", "db_new"), A("in", "db_in"), A("ops", "str", "comma separated operators"),
                  A("fmt_C", "str", "input tag format"), A("fmt_O", "str", "output tag format with %s"),

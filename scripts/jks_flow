@@ -28,15 +28,17 @@ usage = """%s command flow.sh [...]
   export flow.sh id out.jks          write the database of a node
   log flow.sh id                     output of the step that computed a node
   source flow.sh id path             add a source database
+  list flow.sh id word ...           add a list of words for loops ($(jks_list_values id))
   add flow.sh id parent script args  add a step; parent - for scripts that write a new
                                      database; @ is the node's database, @id another node's
   rm flow.sh id                      remove a node nobody reads
   fmt flow.sh                        rewrite the file in canonical form
   gc flow.sh [-n]                    delete stored results no node needs (-n: only report)
 
-The flow file is a bash script; "bash flow.sh" replays it without the cache.""" % sys.argv[0]
+The flow file is a bash script; "bash flow.sh" replays it without the cache.  Loops
+(jks_begin/for/jks_apply/done) are written into the file directly.""" % sys.argv[0]
 
-if len(sys.argv) < 3 or sys.argv[1] not in ("status", "run", "export", "log", "source", "add", "rm", "fmt", "gc"):
+if len(sys.argv) < 3 or sys.argv[1] not in ("status", "run", "export", "log", "source", "list", "add", "rm", "fmt", "gc"):
     print(usage)
     sys.exit(0)
 
@@ -56,7 +58,7 @@ def size(n):
 
 
 try:
-    if cmd in ("source", "add") and not os.path.exists(fn):
+    if cmd in ("source", "list", "add") and not os.path.exists(fn):
         fl = flow.flow(fn)
     else:
         fl = flow.flow.load(fn)
@@ -65,9 +67,16 @@ try:
     if cmd == "status":
         for r in en.status():
             n = fl.nodes[r["id"]]
-            what = "source %s" % n.source if n.is_source() else " ".join(
-                ["%s=%s" % kv for kv in sorted(n.env.items())] + [n.name] + [flow.registry.quote(x) for x in n.argv])
-            print("%-16s %-8s %-20s %s" % (r["id"], r["status"], r["reason"][:20], what[:100]))
+            if n.kind == "source":
+                what = "source %s" % n.source
+            elif n.kind == "list":
+                what = "list " + " ".join(n.values)
+            elif n.kind == "step":
+                env, words = n.cmd.words()
+                what = " ".join(env + words)
+            else:
+                what = "loop over %s: %s (%s)" % (", ".join(n.loop_vars()), ", ".join(c.name for c in n.body), r["detail"])
+            print("%-16s %-8s %-22s %s" % (r["id"], r["status"], r["reason"], what[:100]))
 
     elif cmd == "run":
         jobs, force, ids = 1, False, []
@@ -93,7 +102,9 @@ try:
             if i in res:
                 r = res[i]
                 if r["ok"]:
-                    print("%-16s done in %.2fs, stored %s (%s)" % (i, r["seconds"], r["stored"], size(r["bytes"])))
+                    extra = ", %s over %d iterations, %d script run%s" % (
+                        r["mode"], r["iterations"], r["computed"], "" if r["computed"] == 1 else "s") if "mode" in r else ""
+                    print("%-16s done in %.2fs, stored %s (%s)%s" % (i, r["seconds"], r["stored"], size(r["bytes"]), extra))
                 else:
                     bad += 1
                     print("%-16s FAILED: %s" % (i, r["error"]))
@@ -129,7 +140,13 @@ try:
     elif cmd == "source":
         if len(args) != 2:
             fail("source flow.sh id path")
-        fl.add(flow.node(args[0], source=args[1]))
+        fl.add(flow.node(args[0], "source", source=args[1]))
+        fl.save()
+
+    elif cmd == "list":
+        if len(args) < 1:
+            fail("list flow.sh id word ...")
+        fl.add(flow.node(args[0], "list", values=args[1:]))
         fl.save()
 
     elif cmd == "add":
@@ -139,7 +156,8 @@ try:
         while args and "=" in args[0] and args[0].split("=")[0].isidentifier():
             k, v = args.pop(0).split("=", 1)
             env[k] = v
-        fl.add(flow.node(args[0], None if args[1] == "-" else args[1], os.path.basename(args[2]), args[3:], env))
+        fl.add(flow.node(args[0], "step", None if args[1] == "-" else args[1],
+                         flow.command(os.path.basename(args[2]), args[3:], env)))
         fl.save()
 
     elif cmd == "rm":

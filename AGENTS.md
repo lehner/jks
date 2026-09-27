@@ -159,6 +159,22 @@ scripts/jks_flow       command line for flows (status, run, export, log, add, rm
   generated header defines the helpers, so `bash flow.sh` replays the flow into
   `<flow>.work/files/` (bash 3.2 syntax for macOS; untested there so far) and unsets
   `JKS_*`, `BIN`, `STATS_KEEP_FIXED` like the engine.
+- Lists and loops: `jks_list id word ...` (no database) and loop nodes
+  `jks_begin id parent` / `for v in SPEC; do` / `jks_apply id script argv` / `done`, SPEC =
+  words, `$(seq ...)` (integers), `$(jks_values @node tag)` or `$(jks_list_values id)`; rows
+  `for row in 'a 1' 'b 2'; do read -r x y <<< "$row"`; nesting = product.  Loop variables
+  only as `$v`/`${v}` in double-quoted jks_apply arguments.  Keep parameter nodes that
+  loops read (`jks_add @ lambda "[...]"`) on a side branch: a loop's key has the values,
+  not the value node, so adding a value computes one iteration.
+- `scripts/jks_values db tag`: elements of a constant tag, one per line (integral values
+  without ".0", else shortest round-trip repr); used by both the engine and the replay.
+- Loop modes: map (iterations on the parent, in parallel) if every body script has
+  `appends=True` in the registry, no iteration reads a tag another writes, and at run time
+  each iteration only appended tags (disjointly); then parent + appended tags in iteration
+  order equals the sequential bash loop.  Otherwise sequence (iteration i+1 on i).  Every
+  iteration is cached; `"mode": "sequence"` in the #@jks JSON forces it (not in the key:
+  both modes give the same database).  Tested bit-identical to `bash flow.sh` for list,
+  jks_values, row and nested loops, map and sequence, after incremental edits.
 - Keys (Merkle): script file hash, hash of the jks library sources (jks/*.py, so a solver
   change marks results "code changed"), definition (script, parent, argv, env), keys of the
   inputs, content hash of sources and external databases, size/mtime of glob files.
