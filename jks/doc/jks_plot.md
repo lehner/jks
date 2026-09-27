@@ -15,8 +15,8 @@ and writes them into the directory `out.pdf.input/` (`plots.plt`, `data.NNN`,
 `exiftool` to store the command line (`{'pwd': ..., 'argv': ...}`) in the PDF
 Description field.  Data commands (`c`, `e`, `p`, ...) add curves to the current
 `plot` statement; `newpage` ends it, and the next data command starts a new page.
-Setting commands (`xr`, `k`, `ls`, ...) emit gnuplot `set` lines and stay in effect
-for all later pages.
+Setting commands (`xr`, `k`, `ls`, ...) emit gnuplot `set` lines; they apply to the
+whole page they are on and stay in effect for all later pages.
 
 Each data point carries two error bars: the inner (thin, `lw 0.5`, no point) one is
 the statistical error `sqrt(cov()[i][i])`, the outer one the total error
@@ -82,7 +82,8 @@ gnuplot's enhanced text (`^`, `_`, `{/Symbol ...}`).
 ## Output
 
 `out.pdf`, one page per plot group, cropped (324 x 243 pt for the examples below).
-Gnuplot error output is printed as `Error: ...`; the exit status is 0 in any case.
+Gnuplot output is printed as `Error: ...`; if gnuplot fails, the script prints
+`ERROR: gnuplot failed, out.pdf is not updated` and exits with status 1.
 Without `-k`, `out.pdf.input/` is removed at the end.
 
 ## Environment
@@ -116,17 +117,13 @@ log scale with t >= 32 shown at negative x.  `t.pdf.input/` is kept.
 
 ## Notes
 
-- Setting commands must come before the first data command of a page (or right after
-  `newpage`).  A setting between two data commands, or after the last one, is appended
-  to the unfinished `plot` line (`... notitleset xrange [0:10]`); gnuplot reports
-  `unexpected or unrecognized token: set` and stops, so that page and all later
-  pages are missing or wrong.  `jks_plot2` has no such restriction.
+- A setting command anywhere on a page (also between or after its data commands)
+  applies to the whole page and stays in effect for later pages.
 - `c`, `e`, `p`, `s`, `P`, `Q` silently skip commands whose tag is missing; `b` and
   `f` stop with `KeyError` and leave `out.pdf.input/` behind.
 - In `p`/`s`/`P`/`Q` the x coordinate is the mean of `xtag`, so `xr` refers to its
   values, not to indices.
-- `yt` without labels: the code tests `len(a) == 0`, which is never true, so it emits
-  `set ytics rotate by -45 ()` (automatic tics, rotated) instead of resetting.
+- `yt` without labels resets to automatic, unrotated tics.
 - `out.pdf.input/` is reused if it exists (`force` is always true; the `-f` option in
   the message is disabled).
 - Titles are enclosed in single quotes in the gnuplot script; a `'` in a title breaks

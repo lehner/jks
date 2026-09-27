@@ -52,10 +52,9 @@ t = 0..5, this prints
 
 ## Notes
 
-- Flagged records crash: `reconstruct_min` builds its output with
-  `[0.0 for l in 2*range(NT)]` (lines 47 and 51), which is a `TypeError` in Python 3.
-  Only unflagged records (as written by `corrIO.writer`) can be dumped.
-- No usage text: without an argument it fails with `IndexError`.
+- `corrIO.writer` (used by the jks tools) writes unflagged records only; flagged
+  (real, imag, symm, asymm, empty) records come from other writers.
+- Without an argument the usage is printed.
 
 ## See also
 

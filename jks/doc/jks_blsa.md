@@ -4,7 +4,7 @@ Stores the exact band of output weights under a box prior lower <= z <= upper on
 
 ## Synopsis
 
-    jks_blsa database.jks tag_in list_of_weights_in list_of_weights_out omega_grid tag_lower tag_upper tag_out [dchi2]
+    jks_blsa database.jks tag_in list_of_weights_in list_of_weights_out omega_grid tag_lower tag_upper tag_out [dchi2 [error_tag]]
 
 ## Description
 
@@ -35,6 +35,7 @@ and stored exactly as in `jks_plsa`.
 | `tag_upper` | tag with the upper bound per node (`inf` = unbounded), >= lower |
 | `tag_out` | new tag, one element per output weight; must not exist |
 | `dchi2` | profile-likelihood threshold, default 1; must be > 0 |
+| `error_tag` | name of the band variation, default `band`, as in `jks_plsa` |
 
 ## Output
 
@@ -79,7 +80,7 @@ t=30 are unchanged (t=14: 2.99571e-05 +- 3.498e-07, sys 0).
   bound are always bounded.
 - Lower/upper tags of the wrong shape fail with an `AssertionError`; lower not
   finite or upper < lower raise `ValueError` in the solver.
-- Shared `!band` variation name, late refusal of an existing `tag_out`, int-only
+- Shared `!band` variation name (`error_tag`), refusal of an existing `tag_out`, int-only
   times and run-time behaviour: as in `jks_plsa`.
 - Box splits make the enumeration heavier than `jks_plsa` (3^|S| lower/upper
   splits of a candidate set); the capped example still runs in a fraction of a

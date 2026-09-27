@@ -105,8 +105,8 @@ its page; examples must be runnable on copies of the example databases.
 
 | tool | what it stores |
 |---|---|
-| `jks_plsa db tag_in w_in w_out omega_grid tag_out [dchi2]` | positivity band (z >= 0); central = band midpoint, stat blocks = band centre per resample at its own record chi, `!band` = sqrt(max(half^2 - stat^2, 0)) |
-| `jks_blsa ... omega_grid tag_lower tag_upper tag_out [dchi2]` | same with a box prior l <= z <= u; l=0, u=`np.inf` reproduce `jks_plsa` bit for bit (a finite cap such as the `+1e9` of the lqcd `mk` gives the same means but covariances differing at ~5e-11 relative) |
+| `jks_plsa db tag_in w_in w_out omega_grid tag_out [dchi2 [error_tag]]` | positivity band (z >= 0); central = band midpoint, stat blocks = band centre per resample at its own record chi, `!band` = sqrt(max(half^2 - stat^2, 0)); optional last argument `error_tag` renames `!band` (outputs with the same name share one fully correlated variation) |
+| `jks_blsa ... omega_grid tag_lower tag_upper tag_out [dchi2 [error_tag]]` | same with a box prior l <= z <= u; l=0, u=`np.inf` reproduce `jks_plsa` bit for bit (a finite cap such as the `+1e9` of the lqcd `mk` gives the same means but covariances differing at ~5e-11 relative) |
 | `jks_hlt db tag_in w_in w_out omega_grid tag_out lambda [alpha [p]]` | HLT linear estimate g.C and its jackknife blocks g.C^(b); no systematic |
 | `jks_hlt_kernel db tag_in w_in w_out omega_grid list_of_tags_out lambda [alpha [p]]` | the HLT kernels kbar = sum_i g_i e_i on the grid, one tag per output weight |
 | `jks_cor db tag1 t1 tag2 t2` | prints stat, per-variation shifts, combined sys and total correlation |

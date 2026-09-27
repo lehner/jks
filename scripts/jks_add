@@ -18,6 +18,7 @@
 #    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 #
 import jks, sys, os, math, glob, numpy as np
+from functools import reduce
 if len(sys.argv) < 4 or len(sys.argv) % 2 != 0:
     print("%s database.jks tag1 op1 [tag2 op2 ...]" % sys.argv[0])
     print("")

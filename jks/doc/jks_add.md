@@ -55,8 +55,11 @@ constant weight array `exp(-2 omega)` on the grid `omega0` (zero error).
   `interpolate(y, y_val, x, order)` (x where `y` first crosses `y_val`, order 1 or 2,
   1-element array, NaN if no crossing), `first_available(r, *keys)`, `DT(t,T)`.
   The usage text lists only some of these.
-- `fit` and `cfit` are defined but unusable: `cmerge` calls `reduce`, which is not
-  imported (Python 3), so they fail with `NameError`.
+- `fit(r, lfits, guess)` (uncorrelated) and `cfit(r, lfits, guess)` (correlated)
+  fit `lfits = [(tag, times, lambda t, p: ...), ...]` jointly and return the
+  parameters followed by chi^2, dof and p (NaN for `fit`), e.g.
+  `fit(r, [('C', range(10,20), lambda t,p: p[0]*np.exp(-p[1]*t))], [0.01, 0.4])`.
+  They print every fit; a failed fit gives NaN.
 - Non-finite results (e.g. `emp_log` of a negative ratio) are stored silently.
 - A scalar result (e.g. `np.pi`) is stored as a 0-d array, which `jks_info db tag`
   cannot print; wrap scalars in a list (`[2.0]`).

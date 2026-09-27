@@ -171,15 +171,17 @@ def create_fnc_file(tag,fncs,t0,t1):
     f.close()
     return f.name
 
-nplt=0
+# the curves of the current page; settings go to cmds right away, so that
+# settings anywhere on a page come before its plot statement
+page=[]
 def plot(cc):
-    global nplt,cmds
-    if nplt == 0:
-        cmds=cmds+"plot "
-    else:
-        cmds=cmds+", "
-    cmds=cmds+cc
-    nplt=nplt+1
+    page.append(cc)
+
+def end_page():
+    global page,cmds
+    if len(page) > 0:
+        cmds=cmds+"plot "+", ".join(page)+"\n"
+    page=[]
 
 def get_val(tag,n,fmt):
     jk=jks2.get(tag)
@@ -362,7 +364,7 @@ for c in icmds:
     elif c[0:2] == "yt":
         a=c.split(":")
         n=len(a)-1
-        if len(a) == 0:
+        if n == 0:
             cmds=cmds+"set ytics norotate\n"
             cmds=cmds+"set ytics\n"
         else:
@@ -385,12 +387,11 @@ for c in icmds:
         a=c.split(":")
         cmds=cmds+"set yrange [%s:%s]\n" % (a[1],a[2])
     elif c == "newpage":
-        nplt=0
-        cmds=cmds+"\n"
+        end_page()
     else:
         print("Unknown command %s" % c)
 
-cmds=cmds+"\n"
+end_page()
 
 #print(cmds)
 
@@ -399,7 +400,7 @@ plot.write(cmds)
 plot.close()
 
 make=open(make_name,"wt")
-make.write("#!/bin/bash\n" +
+make.write("#!/bin/bash\nset -e\n" +
 ("gnuplot '%s'\n" % plot_name) +
 #("ps2pdf '%s' '%s'\n" % (fps_name,fpdf_name)) +
 ("pdfcrop '%s' '%s' 1>/dev/null\n" % (fpdf_name,fout)) +
@@ -411,9 +412,14 @@ gp = subprocess.Popen([make_name], stdout=subprocess.PIPE, stdin=subprocess.PIPE
 ret=gp.communicate(input="")
 if ret[0] != b"":
     print("Error: %s" % ret[0].decode("utf-8"))
+failed=gp.returncode != 0
 
 if keep == False:
     for fn in [ desc_name, fpdf_name, plot_name, make_name ] + files: #fps_name,
-        os.unlink(fn)
+        if os.path.exists(fn):
+            os.unlink(fn)
     os.rmdir(targetDir)
 
+if failed:
+    print("ERROR: gnuplot failed, %s is not updated" % fout)
+    sys.exit(1)

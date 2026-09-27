@@ -162,6 +162,7 @@ _spectral_in = [A("database", "db"), A("tag_in", "tag_in", "input data, laid out
                 A("weights_in", "weights", "e.g. [14,16,18] or list(range(4,30))"),
                 A("weights_out", "weights", "e.g. list(range(40))"),
                 A("omega_grid", "tag_in", "grid tag, e.g. omega0")]
+_error_tag = A("error_tag", "str", "variation of the band; outputs with the same name share one", default="band")
 _strength = ("JKS_CORRELATION_STRENGTH", "shrinkage of the input correlations toward the diagonal")
 _fit_env = [("JKS_FIT_TOL", "fit tolerance"), ("JKS_PVAL", "set to append the p-value"),
             ("JKS_HESSIAN_EPS", "step for the Hessian estimate")]
@@ -217,11 +218,12 @@ SCRIPTS = [
            tail=[A("guess", "value"), A("fit_tag", "tag_out")],
            env=_fit_env[:1], produces=_fit_produces, appends=True),
     script("jks_plsa", "spectral", "Positivity band of int rho w_out given the inputs (stat blocks + !band).",
-           head=_spectral_in + [A("tag_out", "tag_out")], optional=[A("dchi2", "float", default="1")],
+           head=_spectral_in + [A("tag_out", "tag_out")],
+           optional=[A("dchi2", "float", default="1"), _error_tag],
            env=[_strength]),
     script("jks_blsa", "spectral", "Positivity band with a box prior lower <= rho <= upper.",
            head=_spectral_in + [A("tag_lower", "tag_in"), A("tag_upper", "tag_in"), A("tag_out", "tag_out")],
-           optional=[A("dchi2", "float", default="1")], env=[_strength]),
+           optional=[A("dchi2", "float", default="1"), _error_tag], env=[_strength]),
     script("jks_hlt", "spectral", "Hansen-Lupo-Tantalo linear estimate g.C (statistical error only).",
            head=_spectral_in + [A("tag_out", "tag_out"), A("lambda", "float")],
            optional=[A("alpha", "float", default="0"), A("p", "float", default="0")], env=[_strength], appends=True),

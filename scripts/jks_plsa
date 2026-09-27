@@ -18,8 +18,8 @@
 #    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 #
 import jks, sys, os, time, numpy as np
-if len(sys.argv) not in (7, 8):
-    print("%s database.jks tag_in list_of_weights_in list_of_weights_out omega_grid tag_out [dchi2]" % sys.argv[0])
+if len(sys.argv) not in (7, 8, 9):
+    print("%s database.jks tag_in list_of_weights_in list_of_weights_out omega_grid tag_out [dchi2 [error_tag]]" % sys.argv[0])
     print("")
     print("- list_of_weights_X accepts a list of")
     print("  a) in integer t for which exp(-t*omega) will be used as the spectral weight")
@@ -32,13 +32,27 @@ if len(sys.argv) not in (7, 8):
     print("  parameter of interest; use 3.84 for 95%.")
     print("")
     print("- Note that an error on omega_grid is not propagated, use multiple omega_grid if needed")
+    print("")
+    print("- error_tag (default band) names the variation !error_tag that holds the band")
+    print("  beyond the statistical error.  Outputs with the same error_tag share one fully")
+    print("  correlated variation (e.g. the same analysis on several omega grids); give")
+    print("  different names for bands that are independent systematics.")
     sys.exit(0)
 
 db, tag_in, list_w_in, list_w_out, omega_grid, tag_out = sys.argv[1:7]
-dchi2 = float(sys.argv[7]) if len(sys.argv) == 8 else 1.0
+dchi2 = float(sys.argv[7]) if len(sys.argv) >= 8 else 1.0
+error_tag = sys.argv[8] if len(sys.argv) >= 9 else "band"
 assert dchi2 > 0.0, "dchi2 must be positive"
 
 res = jks.resamples(db)
+if tag_out in res.keys():
+    print(f"ERROR: tag {tag_out} exists already")
+    sys.exit(1)
+# outputs with the same error_tag share one fully correlated variation
+var_band = error_tag.lstrip("!")
+if var_band == "":
+    print("ERROR: empty error_tag")
+    sys.exit(1)
 
 omega_grid_arr = res.get(omega_grid).mean()
 
@@ -185,7 +199,7 @@ print("")
 # the jackknife wobble of the centre is the same sigma_k.  Adding them in
 # quadrature double counts and was what made the output error at an input
 # timeslice sqrt(2) times the input error.  Only the part of the band that the
-# statistics does not already account for is stored as the '!band' variation,
+# statistics does not already account for is stored as the '!band' variation (error_tag),
 #     sys = sqrt(max(half^2 - stat^2, 0)),
 # so that the total from tcov() is exactly max(stat, half) -- the calibrated
 # combination: 68% where statistics dominates, conservative where the
@@ -243,7 +257,7 @@ for j in range(io):
 print("")
 print(" total = max(stat, half-width of the Delta-chi^2 band); stat is the exact")
 print(" per-resample wobble of the band center (jackknife, gaussian where it dominates),")
-print(" sys = sqrt(half^2 - stat^2) is stored as the '!band' variation so that")
+print(f" sys = sqrt(half^2 - stat^2) is stored as the '!{var_band}' variation so that")
 print(" tcov() reproduces the total.")
 print(" stat/half ~ 1 is the normal, data-dominated case: for an output the data")
 print(" determine, the Delta-chi^2 = 1 half-width IS the 1-sigma statistical error.")
@@ -271,7 +285,7 @@ desc = ("Positivity band beyond the statistical error (range = central +- shift)
         "Input weights: %s"
         % (dchi2, chi_min_in, chi_r, omega_grid, min(omega_grid_arr), max(omega_grid_arr),
            len(omega_grid_arr), sel_w_in))
-jk = jk.addvar("band", central + sys_, desc)
+jk = jk.addvar(var_band, central + sys_, desc)
 res.add(tag_out, jk)
 
 res.save(db)

@@ -37,8 +37,8 @@ Leaves `C`, `Crec`, `omega0`, `omega_low`, `omega_high`, `C.4.14`.
 
 - Variations and configurations used only by removed tags stay in the file; run
   `jks_compress` to drop them.
-- Removing every tag crashes in `save` (`AttributeError: ... '_clone_type_str'`);
-  the file is left unchanged.
+- Removing every tag leaves a database without tags that keeps its configurations
+  and variations; tags can be added to it again.
 - Without a pattern the usage is printed and the exit code is 1 (other scripts
   exit 0).
 - Tag names containing `*`, `?` or `[` need `glob.escape`-style quoting

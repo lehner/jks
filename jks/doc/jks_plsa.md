@@ -4,7 +4,7 @@ Stores the exact spectral-positivity band of output weights, given data at input
 
 ## Synopsis
 
-    jks_plsa database.jks tag_in list_of_weights_in list_of_weights_out omega_grid tag_out [dchi2]
+    jks_plsa database.jks tag_in list_of_weights_in list_of_weights_out omega_grid tag_out [dchi2 [error_tag]]
 
 ## Description
 
@@ -27,7 +27,7 @@ that resample of the inputs, at its own record threshold
 chi_min(C^(b))^2 + dchi2; blocks whose selected inputs equal the mean are not
 re-solved (they get the central value). The part of the half-width the
 statistics does not already cover, sys = sqrt(max(half^2 - stat^2, 0)), is
-stored as the variation `!band`, so that `tcov()` gives max(stat, half).
+stored as the variation `!band` (`!error_tag`), so that `tcov()` gives max(stat, half).
 
 ## Arguments
 
@@ -40,6 +40,7 @@ stored as the variation `!band`, so that `tcov()` gives max(stat, half).
 | `omega_grid` | tag holding the grid nodes (central value used) |
 | `tag_out` | new tag, one element per output weight; must not exist |
 | `dchi2` | profile-likelihood threshold, default 1 (68% for one parameter); 3.84 for 95%; must be > 0 |
+| `error_tag` | name of the variation holding the band beyond the statistical error, default `band` (a leading `!` is ignored) |
 
 ## Output
 
@@ -82,13 +83,14 @@ shrinkage 0.9 (t=1: stat 0.0162, sys 0.0274).
 - Only python `int` elements are treated as times; any other non-string element
   (e.g. `2.5`) fails with `AssertionError: weight not found`. A weight tag whose
   shape differs from the grid fails with `<tag> not found`.
-- Every `jks_plsa`/`jks_blsa` output uses the same variation name `band`. Within
-  one database the `!band` shifts of different outputs are therefore one fully
-  correlated variation (`jks_cor` shows sys correlation +1), and the `band`
-  description accumulates one line per run. If `tag_in` itself carries `!band`,
-  that block is re-solved and then overwritten.
-- Existing `tag_out` is refused only at `res.add`, after the full computation,
-  with a bare `AssertionError`; nothing is written.
+- Outputs with the same `error_tag` share one fully correlated variation
+  (`jks_cor` shows sys correlation +1), and its description accumulates one line
+  per run. This is the default (`band` for every `jks_plsa`/`jks_blsa` run), meant
+  for the same quantity on several omega grids; give independent systematics
+  different names, e.g. `band.C` and `band.Crec`. If `tag_in` itself carries
+  `!error_tag`, that block is re-solved and then overwritten.
+- An existing `tag_out` is refused before the computation (`ERROR: tag ...
+  exists already`, exit 1); nothing is written.
 - Unbounded outputs (a grid node no input weight sees, or input weights
   cancelling on part of the grid) and failed solves print `ERROR: ...` and exit 1;
   non-finite values are never stored. Integer-time weights are always bounded.

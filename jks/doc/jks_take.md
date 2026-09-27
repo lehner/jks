@@ -36,10 +36,10 @@ Writes `C`, `omega0`, `omega_low`, `omega_high` with 28 configs and no variation
 
 ## Notes
 
-- A tag matched by two patterns fails with a bare `AssertionError`; nothing is
-  written.
-- If no tag matches at all, the script crashes in `compress` (`TypeError: object
-  of type 'NoneType' has no len()`) and writes nothing.
+- A tag matched by several patterns is taken once. A pattern without a match
+  prints `WARNING: no tag matches ...`.
+- If no tag matches at all, the script prints `ERROR: ...`, exits with status 1 and
+  writes nothing.
 - Argument order is output first, then input.
 
 ## See also

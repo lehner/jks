@@ -26,17 +26,13 @@ fno=sys.argv[1]
 
 pat=sys.argv[2:]
 
-inp=jks.resamples(fno)
-out=jks.resamples()
+res=jks.resamples(fno)
 
-for k in inp.keys():
-    keep=True
-    for p in pat:
-        if fnmatch.fnmatch(k,p):
-            keep=False
-    if keep:
-        out.add(k,inp.get(k))
+# removed in place, so that removing every tag keeps the configurations
+for k in list(res.keys()):
+    if any(fnmatch.fnmatch(k,p) for p in pat):
+        del res.set[k]
 
-#out.compress()
-out.save(fno)
+#res.compress()
+res.save(fno)
 

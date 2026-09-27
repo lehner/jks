@@ -19,8 +19,8 @@
 #
 import jks, sys, os
 n=len(sys.argv) - 2
-if n < 0 or n % 3 != 0:
-    print("%s output.jks pname pvalue1 perr1 [pvalue2 perr2 ...]" % sys.argv[0])
+if n <= 0 or n % 3 != 0:
+    print("%s output.jks name1 value1 error1 [name2 value2 error2 ...]" % sys.argv[0])
     sys.exit(0)
 n=n//3
 

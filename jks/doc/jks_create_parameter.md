@@ -38,11 +38,8 @@ constant `L = 48`.
 
 ## Notes
 
-- The usage line says `pname pvalue1 perr1 [pvalue2 perr2 ...]`; the code reads
-  groups of three `name value error`.
 - An existing `output.jks` is overwritten, not extended.
-- Without any parameter the script crashes in `save` with
-  `AttributeError: ... '_clone_type_str'` and writes nothing.
+- Without any parameter the usage is printed and nothing is written.
 - A repeated name fails with a bare `AssertionError`.
 - Combine with data via `jks_merge` or `jks_add_from`; the parameters then carry
   zero shift on all configurations.

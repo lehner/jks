@@ -29,7 +29,17 @@ ji=jks.resamples(sys.argv[2])
 
 for f in sys.argv[3:]:
     print("Adding %s" % (f))
-    res.take(ji,f)
+    m=ji.match(f)
+    if len(m) == 0:
+        print("WARNING: no tag matches %s" % f)
+    for n in m:
+        # a tag matched by several patterns is taken once
+        if n not in res.keys():
+            res.add(n,ji.get(n))
+
+if len(res.keys()) == 0:
+    print("ERROR: no tag of %s matches, %s is not written" % (sys.argv[2],fno))
+    sys.exit(1)
 
 res.compress()
 

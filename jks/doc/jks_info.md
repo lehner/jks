@@ -79,9 +79,8 @@ dropped): 3.771e-07 instead of 3.478e-07 unbinned.
 - Do not "fix" the (N-1)/N factor toward `cov()` (see AGENTS.md).
 - N counts all non-`!` blocks, including configurations on which the tag was not
   measured (block = mean, e.g. the other ensemble of a merged database).
-- An element with value exactly 0 makes the formatting fail with
-  `ValueError` (log of 0): in `tag element` mode after the first line, and in
-  every human-readable table containing a 0.
+- An element with value exactly 0 is formatted with the digits of its error,
+  like a small value, e.g. `0.0(1.3)_{stat} \times 10^{-2}`.
 - The `BIN` cyclic-average branch carries the source comment "something goes
   wrong here"; treat binned errors with care.
 - Missing tags raise `KeyError`, out-of-range elements `IndexError`.

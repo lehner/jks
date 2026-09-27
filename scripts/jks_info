@@ -35,11 +35,14 @@ def mka(a):
 def format(value,errors,etags,force_no_digits_shift=False):
     err_digits=2
     error=max( [ math.fabs(errors[e]) for e in etags ] )
-    val_digits_left_of_period=int(math.floor(1e-10 + math.log(math.fabs(value)) / math.log(10.)) + 1)
     if error == 0.0:
         return "%.15g" % (value)
+    err_digits_left_of_period=int(math.floor(1e-10 + math.log(error) / math.log(10.)) + 1)
+    # a value of exactly 0 has no digits of its own, the error sets the format
+    if value == 0.0:
+        val_digits_left_of_period=err_digits_left_of_period
     else:
-        err_digits_left_of_period=int(math.floor(1e-10 + math.log(error) / math.log(10.)) + 1)
+        val_digits_left_of_period=int(math.floor(1e-10 + math.log(math.fabs(value)) / math.log(10.)) + 1)
 
     digits_left_of_period=max([ val_digits_left_of_period, err_digits_left_of_period ])
     digits_right_of_period=err_digits_left_of_period - err_digits
