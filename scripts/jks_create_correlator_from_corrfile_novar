@@ -57,10 +57,8 @@ def load(fn):
     res={}
 
     #if N == 0:
-    citag=set([])
-    for tag in t.keys():
-        citag.add(tag)
-    citag=list(citag)
+    # in the order of the file (a set would order them differently in every run)
+    citag=list(t.keys())
     cotag=citag
     N=len(citag)
 
