@@ -147,10 +147,12 @@ def create_file(tag,t):
     f.flush()
 
     N=len(values)
+    labels=m.config_tags
     nmaxbin=2
     if len(values) % nmaxbin != 0:
         n0=len(values)
         values=values[n0 % nmaxbin:]
+        labels=labels[n0 % nmaxbin:]
         print("Warning: configuration number %d not divisible by %d, remove one" % (n0,nmaxbin))
         print(m.config_tags)
 
@@ -183,7 +185,7 @@ def create_file(tag,t):
 
             idx=1
             for i in range(parts):
-                print("Part %d / %d = %s" % (i,parts,str(m.config_tags[i*ngrp:(i+1)*ngrp])))
+                print("Part %d / %d = %s" % (i,parts,str(labels[i*ngrp:(i+1)*ngrp])))
                 mtt=mt.subset(range(i*ngrp,(i+1)*ngrp))
                 if blocks != 1:
                     mtt=mtt.block(blocks)

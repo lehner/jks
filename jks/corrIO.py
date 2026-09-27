@@ -90,7 +90,7 @@ class reader:
     def __init__(self, fn):
         self.tags = {}
         self.ntags = {}
-        f = open(fn, "r+b")
+        f = open(fn, "rb")  # read only: input files may be read-only
         while True:
             rd = f.read(4)
             if len(rd) == 0:

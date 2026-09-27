@@ -10,17 +10,22 @@ Diagnostic plots (histogram, binning, sub-sample and autocorrelation checks) of 
 
 The tag is copied into a fresh database and compressed to the configurations it uses.
 From its jackknife blocks the script reconstructs per-configuration values
-(`scaled_measurements()`: `N*mean - (N-1)*block_i`) of element `t` and builds, with
-gnuplot (postscript terminal, 16cm x 12cm), a sequence of plots:
+(`scaled_measurements()`: `N*mean - (N-1)*block_i` over the configurations, `!`
+variations are not used) of element `t` and writes, with gnuplot (postscript
+terminal, 16cm x 12cm), a six-page PDF:
 
-1. histogram of the values in `nbins` bins symmetric around the mean, with the
-   expected Gaussian bin counts (same mean and standard deviation), titled `label`;
-2. mean with jackknife error of the original data and of the data blocked by 2, and
-   the bias-corrected mean;
-3. to 5. means of the data split into 2, 4 and 8 consecutive parts, with the p-value of a
-   constant fit to the part means (`p=...` label);
-6. the autocorrelation function versus configuration distance (up to 10 times the
-   smallest spacing of configuration numbers) with a fit `exp(-x/tau_exp)`.
+1. histogram of the values in `nbins` bins symmetric around the mean, drawn
+   horizontally (values on the y axis, counts with `sqrt(count)` errors on the x
+   axis, key title `label`), with the expected Gaussian bin counts for the same mean
+   and standard deviation;
+2. mean with jackknife error of the original data (x = 0) and of the data blocked by
+   2 (x = 1), and a line at the bias-corrected mean;
+3. to 5. the original mean (x = 0) and the means of the data split into 2, 4 and 8
+   consecutive parts (x = 1, 2, ...), with the p-value of an uncorrelated constant
+   fit to the part means (`p=...` label, top right) and the bias-corrected mean;
+6. the autocorrelation function (normalized to 1 at distance 0, jackknife errors)
+   versus the difference of configuration numbers, up to 10 times the smallest
+   spacing, with a gnuplot fit `exp(-x/tau_exp)` whose value is shown in the key.
 
 The PostScript is converted with `ps2pdf`, cropped with `pdfcrop`, and the command
 line is stored in the Description field with `exiftool`.
@@ -38,12 +43,13 @@ line is stored in the Description field with `exiftool`.
 
 ## Output
 
-On stdout: `Compressed to N configs`, the configurations with the 5 largest and 5
-smallest values, `B2/B1 = ...` (ratio of blocked-by-2 to unblocked error), the
-configuration lists of each part, `Avg`, `Std`, `Bias`.  If the number of
-configurations is odd, one is dropped from the binning analysis with a warning.
-The configuration tags must belong to one ensemble (`ens-number`), otherwise an
-assertion fails.
+On stdout: `Compressed to N configs` (N counts the remaining blocks, `!` variations
+included), the configurations with the 5 largest and 5 smallest values,
+`B2/B1 = ...` (ratio of the blocked-by-2 to the unblocked jackknife error), the
+configuration lists of each part, `Avg`, `Std` (standard deviation of the values),
+`Bias`.  If the number of configurations is odd, the first value is dropped from the
+binning, part and p-value analysis with a warning.  The configuration tags must
+belong to one ensemble (`ens-number`), otherwise an assertion fails.
 
 ## Environment
 
@@ -53,23 +59,31 @@ External programs: `gnuplot`, `ps2pdf`, `pdfcrop`, `exiftool`.
 
 ```bash
 jks_plot_dist dist.pdf data.jks C 10 8 "C(10)"
+jks_plot_dist dist2.pdf data.jks C.4.14 10 8 "C.4.14(10)"
 ```
 
-Untested result: in this version the script prints the configuration statistics and
-the part lists and then stops with
-`AttributeError: module 'jks' has no attribute 'plateau'`; no `dist.pdf` is written.
+The first prints `Compressed to 28 configs`, `B2/B1 = 1.0062`, the part lists (2
+parts of 14, 4 of 7, 8 of 3 configurations), `Avg: 0.000160213`,
+`Std: 3.56743e-06`, and writes a six-page `dist.pdf` (p-values 0.64, 0.5, 0.58 of
+the part fits, `tau_exp` = 2.75).  The second works on a tag with a `!band`
+variation (`Compressed to 29 configs`: 28 configurations plus `!band`).
 
 ## Notes
 
-- Broken: the part fits call `jks.plateau(...)` (line 188), which the `jks` package
-  does not define, so the script aborts before any plot is made.  The description of
-  the plots above is from the source only.
-- The max/min listing (lines 108, 112) indexes `jk.tags`, which includes `!`
-  variation tags, with indices of the statistical values only; for a tag with
-  non-zero variations the printed configuration names are shifted, and the
-  autocorrelation step (`int(a.split("-")[1])` on the config tags, line 72) would fail on
-  `!` tags.
-- Temporary files are `tempfile.NamedTemporaryFile` objects; nothing is kept.
+- `B2/B1` compares jackknife `cov()` errors (the N/(N-1) convention) for N
+  configurations and N/2 blocks, so for uncorrelated data it is about
+  `sqrt((N/2/(N/2-1))/(N/(N-1)))` above 1 (1.019 for N = 28).  Clearly larger values
+  indicate autocorrelation.
+- With 4 or 8 parts only `parts * floor(N/parts)` configurations are used; the
+  last ones are left out (4 of 28 with 8 parts in the example).
+- If a value is dropped for odd N, the part checks and their printed lists start at
+  the second configuration.
+- gnuplot's `fit` writes (appends to) `fit.log` in the current directory; the other
+  temporary files are `tempfile.NamedTemporaryFile` objects and are not kept.
+- `jks_gui`'s Distribution tab shows the same checks (histogram against a Gaussian,
+  error of the mean against block size, consecutive parts with the p-value of a
+  constant, autocorrelation) plus skewness, excess kurtosis and a Shapiro-Wilk
+  p-value.
 
 ## See also
 

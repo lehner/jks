@@ -19,7 +19,8 @@ variations) are minimized with scipy Nelder-Mead (`maxiter=10000`, tolerance
 `JKS_FIT_TOL`), each block starting from the command-line `guess` (not from the
 central result).  Tags used as `r['tag']` parameters take the values of the block
 in every refit, as in `jks_fit`, so their fluctuation is propagated.  A block whose
-minimization fails twice aborts the script with an `AssertionError`.  The database is updated in place.
+minimization fails twice aborts the script with an `AssertionError`.  The database
+is updated in place.
 
 ## Arguments
 
