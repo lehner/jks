@@ -72,12 +72,13 @@ def _human(m, errs, etags):
 
 
 class database_view:
-    def __init__(self, db, dark, diff=None, ref=None, fit_source=None, inputs=(), fit=None):
+    def __init__(self, db, dark, diff=None, ref=None, fit_source=None, inputs=(), fit=None, on_delete=None):
         # diff, ref: preview of a step, compared with the database ref
         # inputs: tags the step read; fit: fit tag the step wrote (shown in the fit overlay)
         # fit_source: fit tag -> step that wrote it (functions of the fit), or None
         self.db = db
         self.fit_source = fit_source
+        self.on_delete = on_delete  # async callback(tags) removing tags from the database
         self.dark = dark
         self.diff, self.ref = diff, ref
         self.change = {}
@@ -110,7 +111,11 @@ class database_view:
                 self.only_changes = ui.checkbox("changed and input tags only", value=bool(self.change),
                                                 on_change=self.apply_filter).props("dense")
                 self.only_changes.set_visibility(self.diff is not None)
-                self.count = ui.label().classes("text-xs opacity-70")
+                with ui.row().classes("w-full items-center no-wrap"):
+                    self.count = ui.label().classes("text-xs opacity-70 grow")
+                    self.delete_btn = ui.button("delete selected", icon="delete", on_click=self.confirm_delete) \
+                        .props("flat dense size=sm color=negative")
+                    self.delete_btn.set_visibility(False)
                 self.table = ui.table(
                     columns=[
                         {"name": "tag", "label": "tag", "field": "tag", "align": "left", "sortable": True},
@@ -355,12 +360,33 @@ class database_view:
 
     def set_selected(self, tags):
         self.selected = tags
+        self.delete_btn.set_visibility(self.on_delete is not None and bool(tags))
         self.active_sel.options = tags
         if self.active not in tags:
             self.active = tags[-1] if tags else None
         self.active_sel.value = self.active
         self.active_sel.update()
         self.update_all()
+
+    def confirm_delete(self):
+        tags = list(self.selected)
+        if not tags or self.on_delete is None:
+            return
+        with ui.dialog() as dlg, ui.card().classes("w-[36rem] max-w-full"):
+            ui.label("Delete %d tag%s from %s?" % (len(tags), "" if len(tags) == 1 else "s",
+                                                   self.db.path)).classes("text-lg font-bold break-all")
+            shown = ", ".join(tags[:40]) + (" and %d more" % (len(tags) - 40) if len(tags) > 40 else "")
+            ui.label(shown).classes("text-sm break-all").style("font-family: ui-monospace, monospace")
+            ui.label("This runs jks_rm on the database. The previous version is kept in the backup "
+                     "folder of the work directory.").classes("text-xs opacity-70")
+            sure = ui.checkbox("I understand, delete these tags")
+            with ui.row():
+                async def go():
+                    dlg.close()
+                    await self.on_delete(tags)
+                ui.button("Delete", icon="delete", on_click=go).props("color=negative").bind_enabled_from(sure, "value")
+                ui.button("Cancel", on_click=dlg.close).props("flat")
+        dlg.open()
 
     def on_active(self, e):
         if e.value and e.value != self.active:

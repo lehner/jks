@@ -108,7 +108,9 @@ class step_panel:
             self.help = ui.label().classes("text-xs opacity-70")
             self.form = ui.column().classes("w-full gap-1")
             self.env_box = ui.column().classes("w-full gap-1")
-            ui.label("command (edit or paste, then Enter)").classes("text-xs opacity-70 mt-2")
+            with ui.row().classes("w-full items-center no-wrap mt-2"):
+                ui.label("command (edit or paste, then Enter)").classes("text-xs opacity-70 grow")
+                self.cmd_history = ui.row().classes("gap-0")
             self.cmd = ui.textarea().props("dense outlined autogrow").classes("w-full jks-cmd").style(MONO)
             self.cmd.on("keydown.enter.prevent", self.parse_command)
             self.checks = ui.column().classes("w-full gap-0")
@@ -160,6 +162,9 @@ class step_panel:
                         self.widget(a, self.values["optional"][i], ("optional", i, None), keys)
                     else:
                         ui.label("%s (optional, default %s)" % (a.name, a.default)).classes("text-sm opacity-60")
+        self.cmd_history.clear()
+        with self.cmd_history:
+            self.history_button("command", self.put_command)
         self.env_box.clear()
         if spec.env:
             with self.env_box, ui.expansion("environment", icon="tune").classes("w-full").props("dense"):
@@ -170,6 +175,7 @@ class step_panel:
                         inp = ui.input(var, value=self.env.get(var, "")).props("dense").classes("grow").style(MONO)
                         inp.tooltip(help)
                         inp.on_value_change(lambda e, var=var: self.set_env(var, e.value))
+                        self.history_button("env:" + var, lambda v, inp=inp: inp.set_value(v))
         self.refresh_command()
 
     def render_items(self, items, keys):
@@ -183,28 +189,53 @@ class step_panel:
             ui.label("%s: %s%s" % (label, x or "(no database open)",
                                     "  (created if missing)" if a.kind == "db_maybe" else "")).classes("text-sm")
             return
-        if a.kind in ("db_new", "db_in", "glob"):
-            with ui.row().classes("w-full items-center no-wrap gap-1"):
-                w = ui.input(label + (" (new file)" if a.kind == "db_new" else ""), value=x) \
-                    .props("dense").classes("grow").style(MONO)
+        with ui.row().classes("w-full items-center no-wrap gap-1"):
+            if a.kind == "tag_in" and keys:
+                opts = sorted(set(keys) | ({x} if x else set()))
+                w = ui.select(opts, value=x or None, label=label, with_input=True, new_value_mode="add-unique",
+                              on_change=lambda e, loc=loc: self.set_value(loc, e.value or "")) \
+                    .props("dense").classes("grow")
+
+                def put(v, w=w):
+                    w.options = sorted(set(w.options) | {v})
+                    w.value = v
+            else:
+                if a.kind == "expr":
+                    w = ui.textarea(label, value=x).props("dense autogrow")
+                else:
+                    w = ui.input(label + (" (new file)" if a.kind == "db_new" else ""), value=x).props("dense")
+                w.classes("grow").style(MONO)
                 w.on_value_change(cb)
-                if a.kind == "db_in":
-                    ui.button(icon="folder_open", on_click=lambda w=w: self.pick(w)).props("flat dense")
-        elif a.kind == "tag_in" and keys:
-            opts = sorted(set(keys) | ({x} if x else set()))
-            w = ui.select(opts, value=x or None, label=label, with_input=True, new_value_mode="add-unique",
-                          on_change=lambda e, loc=loc: self.set_value(loc, e.value or "")) \
-                .props("dense").classes("w-full")
-        elif a.kind == "expr":
-            w = ui.textarea(label, value=x).props("dense autogrow").classes("w-full").style(MONO)
-            w.on_value_change(cb)
-        else:
-            w = ui.input(label, value=x).props("dense").classes("w-full").style(MONO)
-            w.on_value_change(cb)
-            if a.kind == "tag_out" and keys:
-                w.validation = {"exists already": lambda v, k=set(keys): v not in k}
+                if a.kind == "tag_out" and keys:
+                    w.validation = {"exists already": lambda v, k=set(keys): v not in k}
+
+                def put(v, w=w):
+                    w.value = v
+            if a.kind == "db_in":
+                ui.button(icon="folder_open", on_click=lambda w=w: self.pick(w)).props("flat dense")
+            self.history_button("%s:%s" % (self.name, a.name), put)
         if a.help:
             w.tooltip(a.help)
+
+    def history_button(self, key, put):
+        # recently used values of this field, newest first
+        vals = self.page.history.get(key)
+        if not vals:
+            return
+        with ui.button(icon="history").props("flat dense size=sm").tooltip("recent values"):
+            with ui.menu():
+                for v in vals:
+                    ui.menu_item(v if len(v) <= 90 else v[:87] + "...", on_click=lambda v=v: put(v)).style(MONO)
+
+    def remember(self, st):
+        e = [("%s:%s" % (st.name, a.name), x) for a, x, _ in reversed(list(st.spec.items(st.values)))
+             if a.kind not in ("db", "db_maybe")]
+        e += [("env:" + k, v) for k, v in st.env.items()]
+        e.append(("command", st.command()))
+        try:
+            self.page.history.add(e)
+        except OSError as err:
+            ui.notify("cannot save the input history: %s" % err, type="warning")
 
     async def pick(self, w):
         path = await file_picker(self.page.base)
@@ -260,6 +291,10 @@ class step_panel:
             for m in msgs:
                 ui.label("⚠ " + m).classes("text-xs text-warning")
 
+    def put_command(self, v):
+        self.cmd.value = v
+        self.parse_command()
+
     def parse_command(self):
         try:
             env, name, argv = registry.split_command(self.cmd.value)
@@ -292,6 +327,7 @@ class step_panel:
         self.log.clear()
         self.outcome.clear()
         self.log.push("$ " + st.command())
+        self.remember(st)
         try:
             m = await self.page.work.run(st, log=self.log.push, procs=self.procs)
         except Exception as e:
@@ -301,6 +337,7 @@ class step_panel:
             self.run_btn.enable()
             self.stop_btn.set_visibility(False)
             self.spinner.set_visibility(False)
+            self.render()  # new history entries
         if not m["ok"]:
             with self.outcome:
                 ui.label("ERROR: " + m["error"]).classes("text-negative text-sm")

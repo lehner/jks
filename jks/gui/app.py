@@ -18,15 +18,16 @@
 #
 # jks_gui application: page layout, command line and access token.
 #
-import argparse, http.cookies, os, secrets, sys, urllib.parse
+import argparse, glob, http.cookies, os, secrets, sys, urllib.parse
 from nicegui import app, run, ui
-from jks.gui import database, runner
+from jks.gui import database, history, runner
 from jks.gui.browser import database_view
 from jks.gui.filepicker import file_picker
 from jks.gui.step import MONO, step_panel
 
 recent = []
 work_name = ".jks_work"
+inputs = None  # history.history of the step panel's fields
 
 
 class token_middleware:
@@ -75,6 +76,7 @@ class db_page:
         self.base = os.path.dirname(self.file) if file else os.getcwd()
         self.work = runner.work(os.path.join(self.base, work_name))
         self.db = None
+        self.history = inputs
         self.view = None
         self.panel = None
         self.dark = ui.dark_mode(False)
@@ -150,7 +152,7 @@ class db_page:
         if self.db is None:
             return
         with self.body:
-            self.view = database_view(self.db, self.dark, fit_source=self.fit_source)
+            self.view = database_view(self.db, self.dark, fit_source=self.fit_source, on_delete=self.delete_tags)
 
     def show_preview(self, panel):
         m, d, child, ref = panel.result
@@ -179,6 +181,27 @@ class db_page:
                     ui.button("Stay", on_click=dlg.close).props("flat")
             dlg.open()
 
+    async def delete_tags(self, tags):
+        # jks_rm with the tag names escaped for fnmatch; commit only if exactly these tags go
+        st = runner.step("jks_rm", [os.path.basename(self.db.path)] + [glob.escape(t) for t in tags], {}, self.base)
+        n = ui.notification("deleting %d tags ..." % len(tags), spinner=True, timeout=None)
+        try:
+            m = await self.work.run(st)
+            if not m["ok"]:
+                raise RuntimeError(m["error"])
+            child = await run.io_bound(database.load, self.work.node(m["key"]))
+            d = runner.diff(self.db.res, child.res)
+            if sorted(d["removed"]) != sorted(tags) or d["added"] or d["modified"]:
+                raise RuntimeError("jks_rm did not remove exactly the selected tags; nothing changed")
+            self.work.commit(m)
+        except Exception as e:
+            n.dismiss()
+            ui.notify("ERROR: %s" % e, type="negative", multi_line=True)
+            return
+        n.dismiss()
+        ui.notify("deleted %d tags (%s)" % (len(tags), m["command"][:120]), type="positive")
+        await self.load(True)
+
     def fit_source(self, fit):
         return runner.find_fit(self.work, fit)
 
@@ -201,11 +224,14 @@ def main(argv=None):
     p.add_argument("--no-token", action="store_true", help="do not require an access token")
     p.add_argument("--native", action="store_true", help="open in a desktop window (needs pywebview)")
     p.add_argument("--browser", action="store_true", help="open a browser even over ssh")
+    p.add_argument("--history", default=None,
+                   help="file with the step panel's input history (default: %s)" % history.default_path())
     p.add_argument("--work", default=".jks_work",
                    help="work directory for step results, relative to each database (default: .jks_work)")
     a = p.parse_args(argv)
-    global work_name
+    global work_name, inputs
     work_name = a.work
+    inputs = history.history(a.history)
 
     for f in reversed(a.files):
         if not os.path.isfile(f):

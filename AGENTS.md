@@ -141,6 +141,8 @@ jks/gui/registry.py    signatures of the jks_* scripts (argv = head + repeat*k +
 jks/gui/runner.py      runs one step on a copy in the work directory, content-hash cache,
                        diff of two databases, commit with hard-link backup and history.sh
 jks/gui/step.py        step panel: form from the registry, pasted commands, preview, commit
+jks/gui/history.py     recently used field values (20 per "script:argument", "env:VAR",
+                       "command"), ~/.config/jks_gui/history.json, merged on every save
 jks/gui/app.py         page, command line, access-token middleware
 scripts/jks_gui        launcher
 ```
@@ -152,6 +154,8 @@ scripts/jks_gui        launcher
   `JKS_*` variable except the step's own.  Results are bit-identical to the same command
   run by hand (tested for jks_add, jks_plsa with and without JKS_CORRELATION_STRENGTH,
   jks_rescale_variance, jks_rm, jks_take).
+- Deleting tags from the tag panel runs `jks_rm` with `glob.escape`d names and commits
+  only if the diff removes exactly the selected tags.
 - Fit overlay (`stats.fit_band`): jks_fit stores per range j the parameters, plus
   [p-value, chi2, dof, npar] with JKS_PVAL (detected from the data), and the fitted data
   as `<fit>.<tag>.input.<j>`.  Default band: f evaluated per jackknife block and variation;
