@@ -183,6 +183,12 @@ class database_view:
                                             value="jackknife", label="band",
                                             on_change=self.update_plot).props("dense").classes("w-48")
                 self.fit_nested = ui.checkbox("stat band inside total band", value=True, on_change=self.update_plot)
+            with ui.row().classes("w-full items-center gap-2"):
+                # limits of the band, blank: whole plot (an extrapolation may be singular)
+                self.fit_lo = ui.number("band from", on_change=self.update_plot).props("dense clearable").classes("w-32")
+                self.fit_hi = ui.number("band to", on_change=self.update_plot).props("dense clearable").classes("w-32")
+                ui.button("fit range only", on_click=self.band_fit_range).props("flat dense size=sm")
+                ui.button("whole plot", on_click=self.band_clear).props("flat dense size=sm")
             self.fit_src = ui.input("fit function of x, p, r (Enter to apply)").props("dense").classes("w-full") \
                 .style("font-family: ui-monospace, monospace")
             self.fit_src.on("keydown.enter", self.update_plot)
@@ -216,7 +222,7 @@ class database_view:
         self.fit_range.value = js[0] if self.fit_range.value not in js else self.fit_range.value
         self.fit_range.update()
         src = self.fit_source(fit) if self.fit_source else None
-        self.fit_origin = src["command"] if src and tag in src["functions"] else None
+        self.fit_origin = (src["command"], src["functions"][tag]) if src and tag in src["functions"] else None
         if src and tag in src["functions"]:
             self.fit_src.value = src["functions"][tag]
         if tag not in self.selected:
@@ -224,6 +230,22 @@ class database_view:
             self.set_selected(self.selected + [tag])
         else:
             self.update_plot()
+
+    def fit_window(self, fit, tag, j, meff):
+        # fitted x range from the .input tag; m_eff(t) needs t and t+1
+        x = np.flatnonzero(np.isfinite(np.asarray(self.db.res.get("%s.%s.input.%d" % (fit, tag, j)).orig, dtype=np.float64)))
+        return (int(x.min()), int(x.max()) - (1 if meff else 0)) if len(x) else None
+
+    def band_fit_range(self):
+        fit, tag, j = self.fit_sel.value, self.fit_tag.value, self.fit_range.value
+        if fit == "(none)" or tag is None or j is None:
+            return
+        w = self.fit_window(fit, tag, j, self.quantity == "meff")
+        if w is not None:
+            self.fit_lo.value, self.fit_hi.value = w
+
+    def band_clear(self):
+        self.fit_lo.value = self.fit_hi.value = None
 
     def plot_fit(self, fig):
         fit, tag, j = self.fit_sel.value, self.fit_tag.value, self.fit_range.value
@@ -237,7 +259,16 @@ class database_view:
         js = stats.fit_inputs(self.db.keys(), fit)[tag]
         meff = self.quantity == "meff"
         n = len(np.atleast_1d(self.db.res.get(tag).orig)) - (1 if meff else 0)
-        xs = np.linspace(0, n - 1, min(600, 10 * (n - 1) + 1))
+        w = self.fit_window(fit, tag, j, meff)
+        x0, x1 = w if w is not None else (0, n - 1)
+        lo = 0.0 if self.fit_lo.value is None else float(self.fit_lo.value)
+        hi = n - 1.0 if self.fit_hi.value is None else float(self.fit_hi.value)
+        if not lo < hi:
+            self.fit_info.text = "band range is empty (from %g to %g)" % (lo, hi)
+            return
+        # about ten points per unit, with the edges of the fit range on the grid
+        xs = np.linspace(lo, hi, int(min(600, 10 * (hi - lo) + 1)))
+        xs = np.unique(np.concatenate([xs, [x for x in (x0, x1) if lo <= x <= hi]]))
         try:
             y, st, tot = stats.fit_band(self.db.res, fit, src, len(js), j, xs, self.convention,
                                         self.fit_method.value, meff=meff)
@@ -247,9 +278,6 @@ class database_view:
             return
         if self.quantity == "abs":
             y = np.abs(y)
-        # fitted range from the .input tag; m_eff(t) needs t and t+1
-        x = np.flatnonzero(np.isfinite(np.asarray(self.db.res.get("%s.%s.input.%d" % (fit, tag, j)).orig, dtype=np.float64)))
-        x0, x1 = (x.min(), x.max() - (1 if meff else 0)) if len(x) else (0, n - 1)
         c = self.color(tag)
         segments = [((xs >= x0) & (xs <= x1), 1.0, "solid"), (xs <= x0, 0.4, "dash"), (xs >= x1, 0.4, "dash")]
         name = "fit %s, range %s" % (fit, self.fit_range.options.get(j, j))
@@ -273,8 +301,13 @@ class database_view:
         lines = ["p = [%s]" % ", ".join(_human(m, {"": e}, [""]) for m, e in zip(ps.mean, pe))]
         if pval:
             lines.append("chi2/dof = %.4g/%d, p-value %.3g" % (P[0, -3], int(P[0, -2]), P[0, -4]))
-        lines.append("function from: %s" % self.fit_origin if getattr(self, "fit_origin", None) else
-                     "function entered here (the step that wrote %s is not known)" % fit)
+        origin = getattr(self, "fit_origin", None)
+        if origin is None:
+            lines.append("function entered here (the step that wrote %s is not known)" % fit)
+        elif origin[1] == src:
+            lines.append("function from: %s" % origin[0])
+        else:
+            lines.append("function edited here; fitted with %s" % origin[1])
         self.fit_info.text = "\n".join(lines)
 
     def build_overview(self):
