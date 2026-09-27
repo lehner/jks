@@ -20,7 +20,8 @@
 #
 import argparse, glob, http.cookies, os, secrets, sys, urllib.parse
 from nicegui import app, run, ui
-from jks.gui import database, history, runner
+from jks.flow import runner
+from jks.gui import database, history
 from jks.gui.browser import database_view
 from jks.gui.filepicker import file_picker
 from jks.gui.step import MONO, step_panel

@@ -128,6 +128,8 @@ Notes:
 ## GUI (`jks_gui`)
 
 Optional NiceGUI web app (`pip install 'jks-system[gui]'`); `import jks` never loads it.
+The flow machinery (`jks/flow/`, behind `jks_flow` and the GUI's steps) needs only the
+core dependencies; `jks/gui/` is installed too but only `jks_gui` needs NiceGUI.
 
 ```
 jks/gui/stats.py       vectorized stat/sys/cov of one tag, no GUI imports (validated
@@ -136,14 +138,14 @@ jks/gui/database.py    read-only database view, cached per path, reload on mtime
 jks/gui/browser.py     database_view component (tag table, plots, table, correlation,
                        configuration z-scores, info); meant to become the node inspector
 jks/gui/filepicker.py  picker for the host's filesystem
-jks/gui/registry.py    signatures of the jks_* scripts (argv = head + repeat*k + tail +
+jks/flow/registry.py   signatures of the jks_* scripts (argv = head + repeat*k + tail +
                        optional[:j], typed roles, env vars); parse/build round-trips argv
-jks/gui/runner.py      runs one step on a copy in the work directory, content-hash cache,
+jks/flow/runner.py     runs one step on a copy in the work directory, content-hash cache,
                        diff of two databases, commit with hard-link backup and history.sh
 jks/gui/step.py        step panel: form from the registry, pasted commands, preview, commit
 jks/gui/history.py     recently used field values (20 per "script:argument", "env:VAR",
                        "command"), ~/.config/jks_gui/history.json, merged on every save
-jks/gui/flow.py        flows: DAG of steps in a bash file (parse/write), engine with keys,
+jks/flow/core.py       flows: DAG of steps in a bash file (parse/write), engine with keys,
                        status, delta store, parallel runs, export, gc (no GUI imports)
 jks/gui/app.py         page, command line, access-token middleware
 scripts/jks_gui        launcher

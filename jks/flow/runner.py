@@ -32,7 +32,7 @@
 import asyncio, datetime, glob, hashlib, json, os, shlex, shutil, subprocess, sys, time
 import numpy as np
 import jks
-from jks.gui import registry
+from jks.flow import registry
 
 _hashes = {}
 

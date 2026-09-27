@@ -22,7 +22,8 @@
 import os
 from nicegui import run, ui
 import jks
-from jks.gui import database, registry, runner
+from jks.flow import registry, runner
+from jks.gui import database
 from jks.gui.filepicker import file_picker
 
 MONO = "font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8rem"

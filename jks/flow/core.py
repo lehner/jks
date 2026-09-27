@@ -66,7 +66,7 @@ import asyncio, datetime, fnmatch, glob, hashlib, itertools, json, os, pickle, r
 import lz4.frame
 import numpy as np
 import jks
-from jks.gui import registry, runner
+from jks.flow import registry, runner
 
 FORMAT = "jks-flow 1"
 ID = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
@@ -137,7 +137,7 @@ _code = None
 
 
 def code_hash():
-    # the jks library (not jks.gui): a changed solver invalidates results like a changed script
+    # the jks library (not jks.flow or jks.gui): a changed solver invalidates results like a changed script
     global _code
     if _code is None:
         root = os.path.dirname(os.path.abspath(jks.__file__))

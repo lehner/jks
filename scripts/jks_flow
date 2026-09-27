@@ -18,7 +18,7 @@
 #    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 #
 import jks, sys, os, asyncio
-from jks.gui import flow
+import jks.flow.core as flow
 
 usage = """%s command flow.sh [...]
 
