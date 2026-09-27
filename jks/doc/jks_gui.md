@@ -5,7 +5,7 @@ Graphical browser for jks databases and designer of data flows, served as a loca
 ## Synopsis
 
     jks_gui [--host HOST] [--port PORT] [--jobs N] [--work DIR] [--history FILE]
-            [--no-token] [--native] [--browser] [file.jks | flow.sh ...]
+            [--no-token] [--native [--debug]] [--browser] [file.jks | flow.sh | mk ...]
 
 ## Description
 
@@ -46,6 +46,7 @@ open dialog) opens as an import page: "Import" writes a new flow file next to it
 | `--history FILE` | file of recently used step-panel values (default `~/.config/jks_gui/history.json`) |
 | `--no-token` | do not require the access token |
 | `--native` | open in a desktop window (needs pywebview; no token) |
+| `--debug` | with `--native`: enable the web inspector of the window (right click, Inspect Element) |
 | `--browser` | open a browser even over ssh |
 
 ## Examples

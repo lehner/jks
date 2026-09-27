@@ -26,4 +26,7 @@ except ImportError as e:
     print("Install with: python3 -m pip install 'jks-system[gui]'")
     sys.exit(1)
 
-main()
+# the native window runs in a process started with "spawn", which imports this file again
+# (as __mp_main__): only the first process may start jks_gui
+if __name__ == "__main__":
+    main()

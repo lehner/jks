@@ -299,8 +299,16 @@ async def import_page(file):
         btn.on_click(go)
 
 
+native_start = None  # path the native window is sent to on its first visit
+
+
 @ui.page("/")
 async def index(file: str = ""):
+    global native_start
+    if not file and native_start:
+        p, native_start = native_start, None
+        ui.navigate.to(p)
+        return
     from jks.flow import mk
     if file and not flowview.is_flow(file) and mk.is_driver(file):
         await import_page(os.path.abspath(file))
@@ -318,6 +326,11 @@ async def index(file: str = ""):
 
 
 def main(argv=None):
+    import multiprocessing
+    if multiprocessing.current_process().name != "MainProcess":
+        # the process of the native window imports the launcher again (spawn); an old
+        # launcher without its __main__ guard would get here
+        return
     p = argparse.ArgumentParser(prog="jks_gui", description="Graphical browser for jks databases.")
     p.add_argument("files", nargs="*", help="databases or flow files to offer (the first one is opened)")
     p.add_argument("--jobs", type=int, default=2, help="parallel steps when running flows (default: 2)")
@@ -326,6 +339,7 @@ def main(argv=None):
     p.add_argument("--no-token", action="store_true", help="do not require an access token")
     p.add_argument("--native", action="store_true", help="open in a desktop window (needs pywebview)")
     p.add_argument("--browser", action="store_true", help="open a browser even over ssh")
+    p.add_argument("--debug", action="store_true", help="with --native: allow the web inspector (right click, Inspect)")
     p.add_argument("--history", default=None,
                    help="file with the step panel's input history (default: %s)" % history.default_path())
     p.add_argument("--work", default=".jks_work",
@@ -355,8 +369,15 @@ def main(argv=None):
     local_display = sys.platform == "darwin" or "DISPLAY" in os.environ or "WAYLAND_DISPLAY" in os.environ
     if not a.native and (a.browser or (local_display and "SSH_CONNECTION" not in os.environ)):
         open_browser(url, a.host, a.port)
+    if a.native:
+        # the window opens "/" (how nicegui builds its address differs between versions, so it
+        # is not overridden); the first visit of "/" is sent on to the file
+        global native_start
+        native_start = path if path != "/" else None
+        if a.debug:
+            app.native.start_args["debug"] = True
     ui.run(host=a.host, port=a.port, title="jks", reload=False, show=False, native=a.native,
-           show_welcome_message=False, favicon="📊")
+           window_size=(1400, 900) if a.native else None, show_welcome_message=False, favicon="📊")
 
 
 def open_browser(url, host, port):
