@@ -192,7 +192,9 @@ class step_panel:
         return self.spec().build(self.values)
 
     def command(self):
-        return registry.join_command(self.env, self.name, self.argv())
+        # in a loop, arguments with $var are double quoted (as in the flow file)
+        q = getattr(self.target, "quote", None)
+        return registry.join_command(self.env, self.name, self.argv(), q() if q else None)
 
     def load_command(self, name, argv, env):
         # fill the form from an existing command (editing a flow node)

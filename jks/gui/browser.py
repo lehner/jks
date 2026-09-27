@@ -56,6 +56,13 @@ def _rgba(c, a):
     return "rgba(%d,%d,%d,%.3f)" % (int(c[1:3], 16), int(c[3:5], 16), int(c[5:7], 16), a)
 
 
+def _float(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
 def _nz(y):
     # zeros and non-finite values become gaps on log axes
     y = np.array(y, dtype=np.float64)
@@ -73,7 +80,8 @@ def _human(m, errs, etags):
 
 class database_view:
     def __init__(self, db, dark, diff=None, ref=None, fit_source=None, inputs=(), fit=None, on_delete=None,
-                 height="calc(100vh - 5rem)"):
+                 height="calc(100vh - 5rem)", scan=None):
+        # scan: {"var": name, "values": [...], "series": {template: [tag per value]}} of a loop node
         # diff, ref: preview of a step, compared with the database ref
         # inputs: tags the step read; fit: fit tag the step wrote (shown in the fit overlay)
         # fit_source: fit tag -> step that wrote it (functions of the fit), or None
@@ -81,6 +89,7 @@ class database_view:
         self.fit_source = fit_source
         self.on_delete = on_delete  # async callback(tags) removing tags from the database
         self.height = height
+        self.scan = scan
         self.dark = dark
         self.diff, self.ref = diff, ref
         self.change = {}
@@ -147,6 +156,7 @@ class database_view:
                     t_cor = ui.tab("Correlation")
                     t_out = ui.tab("Configurations")
                     t_info = ui.tab("Info")
+                    t_scan = ui.tab("Scan") if self.scan else None
                 with ui.tab_panels(tabs, value=t_plot, keep_alive=False).classes("w-full grow"):
                     with ui.tab_panel(t_plot):
                         with ui.row().classes("items-center gap-4"):
@@ -171,6 +181,9 @@ class database_view:
                         self.outliers = ui.plotly(go.Figure()).classes("w-full").style("height: calc(%s - 14rem)" % self.height)
                     with ui.tab_panel(t_info):
                         self.info = ui.column().classes("w-full")
+                    if t_scan is not None:
+                        with ui.tab_panel(t_scan):
+                            self.build_scan()
                 tabs.on_value_change(self.on_tab)
         self.apply_filter()
         if self.new_fit is not None:
@@ -435,7 +448,7 @@ class database_view:
     def update_all(self):
         # only the visible tab is drawn; switching tabs redraws
         {"Plot": self.update_plot, "Table": self.update_table, "Correlation": self.update_cor,
-         "Configurations": self.update_outliers, "Info": self.update_info}[self.tab]()
+         "Configurations": self.update_outliers, "Info": self.update_info, "Scan": self.update_scan}[self.tab]()
 
     def color(self, tag):
         # a tag keeps its color while selected, independent of selection order
@@ -602,6 +615,52 @@ class database_view:
         else:
             fig.update_layout(**self.layout())
         self.outliers.update_figure(_figure(fig))
+
+    # ---- scan of a loop: every iteration's output against the loop value ----
+    def build_scan(self):
+        sc = self.scan
+        first = next((t for ts in sc["series"].values() for t in ts if t in self.db.res.set), None)
+        n = len(np.atleast_1d(self.db.res.get(first).orig)) if first else 1
+        with ui.row().classes("items-center gap-4"):
+            self.scan_series = ui.select(list(sc["series"]), value=list(sc["series"])[0], label="output",
+                                         on_change=self.update_scan).props("dense").classes("w-64")
+            self.scan_index = ui.number("element", value=0, min=0, max=max(n - 1, 0), step=1,
+                                        on_change=self.update_scan).props("dense").classes("w-28")
+            numeric = all(_float(v) is not None for v in sc["values"])
+            self.scan_log = ui.checkbox("log x", value=numeric and all(_float(v) > 0 for v in sc["values"]) and
+                                        max(_float(v) for v in sc["values"]) / max(min(_float(v) for v in sc["values"]), 1e-300) > 50,
+                                        on_change=self.update_scan)
+            self.scan_log.set_visibility(numeric)
+            ui.label("x: $%s; error bars as jks_plot2" % sc["var"]).classes("text-xs opacity-70")
+        self.scan_plot = ui.plotly(go.Figure()).classes("w-full").style("height: calc(%s - 14rem)" % self.height)
+
+    def update_scan(self, e=None):
+        sc = self.scan
+        tags = sc["series"][self.scan_series.value]
+        k = int(self.scan_index.value or 0)
+        numeric = all(_float(v) is not None for v in sc["values"])
+        xs, ys, st, tot, names = [], [], [], [], []
+        for v, t in zip(sc["values"], tags):
+            if t not in self.db.res.set:
+                continue
+            s = self.db.stats(t, self.convention)
+            if k >= len(s.mean):
+                continue
+            xs.append(_float(v) if numeric else v)
+            ys.append(s.mean[k]); st.append(s.stat_err()[k]); tot.append(s.tot_err()[k]); names.append(t)
+        c = SERIES[0][1 if self.dark.value else 0]
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=xs, y=ys, mode="markers", name=self.scan_series.value,
+                                 marker=dict(size=8, color=c), text=names,
+                                 error_y=dict(type="data", array=tot, visible=True, thickness=1.5, width=5, color=c),
+                                 hovertemplate="%{text}: %{y:.8g}<extra></extra>"))
+        fig.add_trace(go.Scatter(x=xs, y=ys, mode="markers", showlegend=False, hoverinfo="skip",
+                                 marker=dict(size=1, opacity=0, color=c),
+                                 error_y=dict(type="data", array=st, visible=True, thickness=0.75, width=5, color=c)))
+        fig.update_layout(**self.layout(xaxis_title="$" + sc["var"], yaxis_title="%s [%d]" % (self.scan_series.value, k),
+                                        xaxis_type="log" if (numeric and self.scan_log.value) else
+                                        ("linear" if numeric else "category")))
+        self.scan_plot.update_figure(_figure(fig))
 
     def update_info(self):
         self.info.clear()

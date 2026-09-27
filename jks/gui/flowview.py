@@ -66,6 +66,11 @@ def layout(fl):
     return pos
 
 
+def _plain(a):
+    # an argument with its loop variables removed, for readable default ids
+    return re.sub(r"[.]?\$\{?[A-Za-z_][A-Za-z0-9_]*\}?", "", a)
+
+
 def new_id(fl, name, argv):
     # the first output tag if it makes a readable id, else the script name
     spec = registry.BY_NAME[name]
@@ -87,6 +92,9 @@ class flow_target:
         self.edit = None  # id of the node being edited
         self.node_id = None
         self.label = ""
+        # a loop: {"levels": [loop spec], "body": [[name, argv, env]], "cur": k, "mode": auto|map|sequence};
+        # the panel's form edits body[cur]
+        self.loop = None
 
     @property
     def db(self):
@@ -118,6 +126,19 @@ class flow_target:
 
     def node(self, name, argv, env):
         spec = registry.BY_NAME[name]
+        if self.loop is not None:
+            L = self.loop
+            L["body"][L["cur"]] = [name, list(argv), dict(env)]
+            body = [core.command(b[0], b[1], b[2]) for b in L["body"]]
+            meta = dict(self.page.fl.nodes[self.edit].meta) if self.edit else ({"label": self.label} if self.label else {})
+            meta.pop("mode", None)
+            if L["mode"] != "auto":
+                meta["mode"] = L["mode"]
+            first = L["body"][0]
+            i = self.edit or self.node_id or new_id(self.page.fl, first[0], [_plain(a) for a in first[1]])
+            notes = self.page.fl.nodes[self.edit].notes if self.edit else ()
+            return core.node(i, "loop", self.parent(), loops=[dict(l) for l in L["levels"]], body=body,
+                             meta=meta, notes=notes)
         parent = self.parent() if spec.primary_kind() in ("db", "db_maybe") else None
         if self.edit:
             old = self.page.fl.nodes[self.edit]
@@ -145,12 +166,39 @@ class flow_target:
         msgs = []
         spec = registry.BY_NAME[name]
         v = spec.parse(argv)
+        if n.kind == "loop":
+            return msgs + self.check_loop(fl, n, db)
         if db is not None and spec.primary_kind() in ("db", "db_maybe"):
             have = set(db.keys())
             out = [t for t in spec.tags_out(v) if "*" not in t]
             msgs += ["tag %s exists already" % t for t in out if t in have]
             msgs += ["tag %s not found" % t for t in spec.tags_in(v) if t not in have and t not in out]
         return msgs
+
+    def check_loop(self, fl, n, db):
+        # the tags of every iteration against the database the loop starts from
+        try:
+            its = self.iterations(fl, n)
+        except (core.NotReady, core.FlowError, OSError):
+            return []
+        msgs, seen = [], {}
+        have = set(db.keys()) if db is not None else set()
+        for it in its:
+            for c in n.body:
+                x = c.instance(it)
+                for t in [t for t in x.spec().tags_out(x.values()) if "*" not in t]:
+                    if t in have:
+                        msgs.append("tag %s exists already" % t)
+                    elif t in seen and seen[t] != it:
+                        msgs.append("iterations %s and %s both write %s" % (seen[t], it, t))
+                    seen.setdefault(t, it)
+        if not its:
+            msgs.append("the loop has no iterations")
+        return sorted(set(msgs))[:8]
+
+    def iterations(self, fl, n):
+        en = core.engine(fl, self.page.en.work)
+        return en.iterations(n, en.keys())
 
     def normalize(self, spec, values):
         if spec.get_primary(values) != "@":
@@ -161,17 +209,182 @@ class flow_target:
     def render_extra(self, panel):
         if self.edit:
             with ui.row().classes("w-full items-center no-wrap"):
-                ui.label("editing node %s" % self.edit).classes("text-sm font-bold grow")
+                ui.label("editing %s %s" % ("loop" if self.loop else "node", self.edit)).classes("text-sm font-bold grow")
                 ui.button("new node instead", on_click=lambda: self.page.start_add()).props("flat dense size=sm")
-            return
-        p = self.parent()
-        ui.label("new node after %s" % p if p else "new node (select a node to start from it)") \
-            .classes("text-sm font-bold")
+        else:
+            p = self.parent()
+            ui.label("new node after %s" % p if p else "new node (select a node to start from it)") \
+                .classes("text-sm font-bold")
+            with ui.row().classes("w-full items-center no-wrap gap-1"):
+                ui.input("node id (default from the output)", value=self.node_id or "",
+                         on_change=lambda e: self.set_id(e.value)).props("dense").classes("grow").style(MONO)
+                ui.input("label", value=self.label, on_change=lambda e: setattr(self, "label", e.value)) \
+                    .props("dense").classes("grow")
+            if self.parent():
+                ui.checkbox("loop: repeat the step for a list of values", value=self.loop is not None,
+                            on_change=lambda e: self.toggle_loop(panel, e.value)).props("dense")
+        if self.loop is not None:
+            self.render_loop(panel)
+
+    def toggle_loop(self, panel, on):
+        if on and self.loop is None:
+            lists = [i for i, n in self.page.fl.nodes.items() if n.kind == "list"]
+            level = {"vars": ["x"], "kind": "list", "list": lists[-1]} if lists else \
+                {"vars": ["x"], "kind": "words", "words": []}
+            self.loop = {"levels": [level], "body": [[panel.name, panel.argv(), dict(panel.env)]], "cur": 0,
+                         "mode": "auto"}
+        elif not on:
+            self.loop = None
+        panel.render()
+
+    def render_loop(self, panel):
+        L = self.loop
+        with ui.card().classes("w-full p-2 gap-1").props("flat bordered"):
+            for k, l in enumerate(L["levels"]):
+                self.render_level(panel, k, l)
+            with ui.row().classes("items-center gap-2"):
+                ui.button("nested loop", icon="add", on_click=lambda: self.add_level(panel)).props("flat dense size=sm")
+                ui.select({"auto": "mode: auto", "map": "mode: map", "sequence": "mode: sequence"}, value=L["mode"],
+                          on_change=lambda e: L.update(mode=e.value)).props("dense").classes("w-40") \
+                    .tooltip("map: iterations run independently (only for steps that just add tags); "
+                             "sequence: one after the other; auto: map when possible")
+            self.summary = ui.label().classes("text-xs opacity-80 break-all")
+            ui.label("use %s in the fields below" % ", ".join("$" + v for l in L["levels"] for v in l["vars"])) \
+                .classes("text-xs opacity-70")
+            with ui.row().classes("items-center gap-1"):
+                ui.label("body:").classes("text-xs")
+                for k, b in enumerate(L["body"]):
+                    ui.button("%d: %s" % (k + 1, b[0]), on_click=lambda k=k: self.switch(panel, k)) \
+                        .props("dense size=sm" + ("" if k == L["cur"] else " flat"))
+                ui.button(icon="add", on_click=lambda: self.add_command(panel)).props("flat dense size=sm") \
+                    .classes("jks-add-cmd").tooltip("another command per iteration")
+                if len(L["body"]) > 1:
+                    ui.button(icon="remove", on_click=lambda: self.remove_command(panel)).props("flat dense size=sm") \
+                        .tooltip("remove this command")
+        asyncio.ensure_future(self.update_summary(panel))
+
+    def render_level(self, panel, k, l):
+        kinds = {"list": "list node", "values": "values of a tag", "words": "words", "seq": "seq", "rows": "rows"}
+        kind = "rows" if l["kind"] == "words" and len(l["vars"]) > 1 else l["kind"]
         with ui.row().classes("w-full items-center no-wrap gap-1"):
-            ui.input("node id (default from the output)", value=self.node_id or "",
-                     on_change=lambda e: self.set_id(e.value)).props("dense").classes("grow").style(MONO)
-            ui.input("label", value=self.label, on_change=lambda e: setattr(self, "label", e.value)) \
-                .props("dense").classes("grow")
+            ui.label("for").classes("text-xs")
+            if kind == "rows":
+                ui.input("variables", value=" ".join(l["vars"]),
+                         on_change=lambda e, l=l: self.set_level(panel, l, vars=e.value.split() or ["x"])) \
+                    .props("dense").classes("w-28").style(MONO)
+            else:
+                ui.input("variable", value=l["vars"][0],
+                         on_change=lambda e, l=l: self.set_level(panel, l, vars=[e.value.strip() or "x"])) \
+                    .props("dense").classes("w-20").style(MONO)
+            ui.label("in").classes("text-xs")
+            ui.select(kinds, value=kind, label="values from", on_change=lambda e, l=l: self.set_kind(panel, l, e.value)) \
+                .props("dense").classes("w-36")
+            if kind == "list":
+                lists = [i for i, n in self.page.fl.nodes.items() if n.kind == "list"]
+                ui.select(lists, value=l.get("list") if l.get("list") in lists else None, label="list",
+                          on_change=lambda e, l=l: self.set_level(panel, l, list=e.value)).props("dense").classes("grow")
+            elif kind == "values":
+                nodes = [i for i, n in self.page.fl.nodes.items() if n.has_db() and i != self.edit]
+                ui.select(nodes, value=l.get("node") if l.get("node") in nodes else None, label="node",
+                          on_change=lambda e, l=l: self.set_level(panel, l, node=e.value)).props("dense").classes("w-32")
+                ui.input("tag", value=l.get("tag", ""), on_change=lambda e, l=l: self.set_level(panel, l, tag=e.value)) \
+                    .props("dense").classes("grow").style(MONO)
+            elif kind == "words":
+                ui.input("words", value=" ".join(l.get("words", [])),
+                         on_change=lambda e, l=l: self.set_level(panel, l, words=e.value.split())) \
+                    .props("dense").classes("grow").style(MONO)
+            elif kind == "seq":
+                s3 = (l.get("seq") or [1, 1, 10])
+                s3 = [1, 1, s3[0]] if len(s3) == 1 else [s3[0], 1, s3[1]] if len(s3) == 2 else list(s3)
+                for j, lab in enumerate(["first", "step", "last"]):
+                    ui.number(lab, value=s3[j], step=1, format="%d",
+                              on_change=lambda e, l=l, j=j, s3=s3: self.set_seq(panel, l, s3, j, e.value)) \
+                        .props("dense").classes("w-20")
+            if len(self.loop["levels"]) > 1:
+                ui.button(icon="close", on_click=lambda k=k: self.remove_level(panel, k)).props("flat dense size=sm")
+        if kind == "rows":
+            ui.textarea("rows, one per line (values separated by spaces)", value="\n".join(l.get("words", [])),
+                        on_change=lambda e, l=l: self.set_level(panel, l, words=[r.strip() for r in e.value.split("\n")
+                                                                                 if r.strip()])) \
+                .props("dense autogrow").classes("w-full").style(MONO)
+
+    def set_kind(self, panel, l, kind):
+        v = l["vars"]
+        l.clear()
+        if kind == "rows":
+            l.update(vars=v if len(v) > 1 else v + ["y"], kind="words", words=[], row="row")
+        else:
+            l.update(vars=v[:1], kind=kind)
+            l.update({"list": {}, "values": {"node": None, "tag": ""}, "words": {"words": []},
+                      "seq": {"seq": [1, 1, 10]}}[kind])
+        panel.render()
+
+    def set_level(self, panel, l, **kw):
+        l.update(kw)
+        panel.refresh_command()
+        asyncio.ensure_future(self.update_summary(panel))
+
+    def set_seq(self, panel, l, s3, j, v):
+        try:
+            s3[j] = int(v)
+        except (TypeError, ValueError):
+            return
+        l["seq"] = list(s3)
+        self.set_level(panel, l)
+
+    def add_level(self, panel):
+        self.loop["levels"].append({"vars": ["y"], "kind": "words", "words": []})
+        panel.render()
+
+    def remove_level(self, panel, k):
+        del self.loop["levels"][k]
+        panel.render()
+
+    def store(self, panel):
+        self.loop["body"][self.loop["cur"]] = [panel.name, panel.argv(), dict(panel.env)]
+
+    def switch(self, panel, k):
+        self.store(panel)
+        self.loop["cur"] = k
+        panel.load_command(*self.loop["body"][k])
+
+    def add_command(self, panel):
+        self.store(panel)
+        self.loop["body"].append(["jks_add", ["@", "", ""], {}])
+        self.loop["cur"] = len(self.loop["body"]) - 1
+        panel.load_command(*self.loop["body"][-1])
+
+    def remove_command(self, panel):
+        L = self.loop
+        del L["body"][L["cur"]]
+        L["cur"] = max(0, L["cur"] - 1)
+        panel.load_command(*L["body"][L["cur"]])
+
+    async def update_summary(self, panel):
+        label = getattr(self, "summary", None)
+        if label is None:
+            return
+        # only the latest request writes the label (an older, slower one must not overwrite it)
+        self._seq = getattr(self, "_seq", 0) + 1
+        seq = self._seq
+        try:
+            fl, n = self.candidate(panel.name, panel.argv(), panel.env)
+            its = await run.io_bound(self.iterations, fl, n)
+            text = "%d iteration%s: %s" % (len(its), "" if len(its) == 1 else "s", "; ".join(
+                " ".join("%s=%s" % kv for kv in it.items()) for it in its[:6]) + (" ..." if len(its) > 6 else ""))
+        except core.NotReady:
+            text = "values: the node that holds them is not computed yet"
+        except (core.FlowError, ValueError, AssertionError, OSError) as e:
+            text = str(e)
+        if seq != self._seq:
+            return
+        try:
+            label.text = text
+        except RuntimeError:
+            pass
+
+    def quote(self):
+        return core._qvar if self.loop is not None else None
 
     def set_id(self, v):
         self.node_id = v.strip() or None
@@ -464,11 +677,10 @@ class flow_page:
             ui.space()
             if n.has_db():
                 ui.button("Add step", icon="add", on_click=self.start_add).props("flat dense")
-            if n.kind == "step":
+            if n.kind in ("step", "loop"):
                 ui.button("Edit", icon="edit", on_click=lambda: self.start_edit(id)).props("flat dense")
-            elif n.kind == "loop":
-                ui.button("Edit", icon="edit").props("flat dense").disable()
-                ui.label("(loops: edit the file for now)").classes("text-xs opacity-60")
+            elif n.kind == "list":
+                ui.button("Edit", icon="edit", on_click=lambda: self.edit_list(id)).props("flat dense")
             if st != "ok" and n.kind in ("step", "loop"):
                 ui.button("Run", icon="play_arrow", on_click=lambda: self.run_nodes([id])).props("flat dense")
             if n.kind in ("step", "loop"):
@@ -525,10 +737,30 @@ class flow_page:
                     ui.icon("history")
                     ui.label("stale (%s): showing the last computed result" % info.get("reason", "")).classes("text-sm grow")
                     ui.button("Run", icon="play_arrow", on_click=lambda: self.run_nodes([id])).props("flat dense")
+            scan = await self.scan_of(n) if n.kind == "loop" else None
             self.view = database_view(db, self.dark, fit_source=self.fit_source, on_delete=self.propose_rm,
-                                      height="calc(70vh - 7rem)")
+                                      height="calc(70vh - 7rem)", scan=scan)
         if self.panel is not None and not self.target.edit and self.panel.result is None:
             self.panel.render()
+
+    async def scan_of(self, n):
+        # a loop over one variable: its outputs per value, for the Scan tab
+        if len(n.loop_vars()) != 1:
+            return None
+        var = n.loop_vars()[0]
+        try:
+            its = await run.io_bound(self.target.iterations, self.fl, n)
+        except (core.NotReady, core.FlowError, OSError):
+            return None
+        series = {}
+        for c in n.body:
+            spec = c.spec()
+            for tpl in spec.tags_out(c.values()):
+                if "$" in tpl and "*" not in tpl:
+                    series[tpl] = [core._subst(tpl, it) for it in its]
+        if not series:
+            return None
+        return {"var": var, "values": [it[var] for it in its], "series": series}
 
     def active_tag(self):
         v = self.view
@@ -537,6 +769,7 @@ class flow_page:
     # ---- actions ----
     def start_add(self):
         self.target.edit = None
+        self.target.loop = None
         self.drawer.value = True
         self.panel.render()
         self.panel.fill_active()
@@ -545,12 +778,40 @@ class flow_page:
         n = self.fl.nodes[id]
         self.target.edit = id
         self.drawer.value = True
-        self.panel.load_command(n.cmd.name, n.cmd.argv, n.cmd.env)
+        if n.kind == "loop":
+            self.target.loop = {"levels": [dict(l) for l in n.loops],
+                                "body": [[c.name, list(c.argv), dict(c.env)] for c in n.body], "cur": 0,
+                                "mode": n.meta.get("mode", "auto")}
+            self.panel.load_command(*self.target.loop["body"][0])
+        else:
+            self.target.loop = None
+            self.panel.load_command(n.cmd.name, n.cmd.argv, n.cmd.env)
+
+    def edit_list(self, id):
+        n = self.fl.nodes[id]
+        with ui.dialog() as dlg, ui.card().classes("w-[30rem]"):
+            ui.label("list %s" % id).classes("font-bold")
+            words = ui.input("words, separated by spaces", value=" ".join(n.values)).classes("w-full").style(MONO)
+
+            async def go():
+                try:
+                    self.fl.replace(core.node(id, "list", values=words.value.split(), meta=n.meta, notes=n.notes))
+                    self.save()
+                except core.FlowError as e:
+                    self.notify(str(e), type="negative")
+                    return
+                dlg.close()
+                await self.after_change(id, True)
+            with ui.row():
+                ui.button("Save", on_click=go)
+                ui.button("Cancel", on_click=dlg.close).props("flat")
+        dlg.open()
 
     def propose_rm(self, tags):
         # deleting tags in a flow is a jks_rm node after the selected one
         async def go():
             self.target.edit = None
+            self.target.loop = None
             self.drawer.value = True
             self.panel.load_command("jks_rm", ["@"] + [glob.escape(t) for t in tags], {})
             self.notify("jks_rm prepared in the step panel: Preview, then add it to the flow", type="info")
@@ -564,6 +825,9 @@ class flow_page:
                                      height="calc(70vh - 9rem)", title=title)
 
     async def after_change(self, id, edited):
+        # after adding a loop the panel stays in loop mode (for a similar loop); edits end here
+        if edited:
+            self.target.loop = None
         self.target.edit = None
         await self.refresh()
         await self.select(id)

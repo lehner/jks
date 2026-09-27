@@ -84,7 +84,7 @@ HEADER = """#!/usr/bin/env bash
 #
 set -euo pipefail
 cd "$(dirname "$0")"
-W="${JKS_FLOW_WORK:-%s}/files"
+W="${JKS_FLOW_WORK:-$(basename "$0" .sh).work}/files"
 mkdir -p "$W"
 # results must not depend on the caller's environment (steps set their own variables)
 for v in $(compgen -e); do case $v in JKS_*|%s) unset "$v" ;; esac; done
@@ -463,9 +463,8 @@ class flow:
 
     def text(self):
         name = os.path.basename(self.path)
-        work = os.path.splitext(name)[0] + ".work"
         extra = "|".join(v for v in registry.ENV_ALL if not v.startswith("JKS_"))
-        out = [HEADER % (FORMAT, name, name, work, extra)]
+        out = [HEADER % (FORMAT, name, name, extra)]
         for n in self.nodes.values():
             out += n.notes
             out.append("#@jks " + json.dumps(n.meta, sort_keys=True))

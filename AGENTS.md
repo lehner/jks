@@ -207,8 +207,13 @@ scripts/jks_flow       command line for flows (status, run, export, log, add, rm
   (`flow_page.engine_run`); log lines and node states come back through a queue drained
   by a timer, so UI code never runs in the worker.  Notifications go through
   `flow_page.notify` (the element that triggered an action may have been deleted).
-  Deleting tags in a flow proposes a `jks_rm` node.  Loops are shown and computed but
-  edited in the file for now.
+  Deleting tags in a flow proposes a `jks_rm` node.  Loops: the step panel's "loop"
+  checkbox adds loop levels (list node, jks_values of a tag, words, seq, rows; nested),
+  a body of one or more commands (chips; the form edits one), and the mode; `$var` is
+  allowed in every field and the command box quotes such arguments with double quotes.
+  Loop and list nodes are edited like steps (descendants recompute, unchanged
+  iterations come from the cache).  A loop over one variable gets a Scan tab in the
+  inspector: each output template (e.g. C.hlt.$lam) against the loop value.
 - Deleting tags from the tag panel runs `jks_rm` with `glob.escape`d names and commits
   only if the diff removes exactly the selected tags.
 - Fit overlay (`stats.fit_band`): jks_fit stores per range j the parameters, plus

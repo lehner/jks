@@ -289,9 +289,9 @@ def quote(x):
     return shlex.quote(x)
 
 
-def join_command(env, name, argv):
-    return " ".join(["%s=%s" % (k, quote(v)) for k, v in sorted(env.items())] +
-                    [name] + [quote(x) for x in argv])
+def join_command(env, name, argv, q=None):
+    q = q or quote
+    return " ".join(["%s=%s" % (k, q(v)) for k, v in sorted(env.items())] + [name] + [q(x) for x in argv])
 
 
 def script_path(name):
