@@ -632,10 +632,19 @@ class database_view:
                                         on_change=self.update_scan)
             self.scan_log.set_visibility(numeric)
             ui.label("x: $%s; error bars as jks_plot2" % sc["var"]).classes("text-xs opacity-70")
-        self.scan_plot = ui.plotly(go.Figure()).classes("w-full").style("height: calc(%s - 14rem)" % self.height)
+        self.scan_box = ui.column().classes("w-full")
+        self.scan_plot = None  # created when the tab is first shown
 
     def update_scan(self, e=None):
         sc = self.scan
+        if self.scan_plot is None:
+            # first shown: create the plot once the tab panel is displayed (not during the switch)
+            def create():
+                with self.scan_box:
+                    self.scan_plot = ui.plotly(go.Figure()).classes("w-full").style("height: calc(%s - 14rem)" % self.height)
+                self.update_scan()
+            ui.timer(0.3, create, once=True)
+            return
         tags = sc["series"][self.scan_series.value]
         k = int(self.scan_index.value or 0)
         numeric = all(_float(v) is not None for v in sc["values"])

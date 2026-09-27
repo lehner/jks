@@ -463,6 +463,7 @@ class flow_page:
         self.panel = None
         self.target = flow_target(self)
         self.base = self.fl.base
+        self.chart_px = (1500.0, 300.0)  # measured in the browser
 
     def notify(self, msg, **kw):
         # from a persistent element: the element that triggered an action may be gone by now
@@ -551,6 +552,7 @@ class flow_page:
             self.panel = step_panel(self, self.target)
         ui.timer(0.2, self.drain)
         ui.timer(3.0, self.poll)
+        await self.measure()
         await self.refresh()
         first = next((i for i in reversed(list(self.fl.nodes)) if self.fl.nodes[i].has_db()), None)
         if first:
@@ -596,14 +598,44 @@ class flow_page:
                          "tooltip": {"formatter": tip}})
             for r in n.inputs():
                 dashed = r != n.parent
-                links.append({"source": r, "target": i,
-                              "lineStyle": {"type": "dashed" if dashed else "solid", "width": 1.5, "curveness": 0.15}})
+                # every item needs a value: nicegui's point click handler reads it (also for edges)
+                how = "copied from" if not dashed else "values from" if r in n.value_inputs() else "reads"
+                # long edges curve less (they would arc out of the chart)
+                span = max(abs(pos[i][0] - pos[r][0]) / 160.0, 1.0)
+                links.append({"source": r, "target": i, "value": "%s %s %s" % (i, how, r),
+                              "tooltip": {"formatter": "%s %s %s" % (i, how, r)},
+                              "lineStyle": {"type": "dashed" if dashed else "solid", "width": 1.5,
+                                            "curveness": 0.15 / span}})
+        # ECharts stretches positions (and symbols) to the box: pad the layout to the box's aspect
+        # ratio with two invisible points so that x and y are scaled alike
+        margin = (50, 70, 30, 45)  # left, right, top, bottom
+        if pos:
+            # wide charts: spread the columns (up to 2.5 times) before padding
+            want = max(self.chart_px[0] - margin[0] - margin[1], 50) / max(self.chart_px[1] - margin[2] - margin[3], 50)
+            xs, ys = [p[0] for p in pos.values()], [p[1] for p in pos.values()]
+            f = min(max(want * (max(ys) - min(ys) + 40) / max(max(xs) - min(xs) + 80, 1), 1.0), 2.5)
+            pos = dict((i, (x * f, y)) for i, (x, y) in pos.items())
+            for d in data:
+                d["x"] *= f
+            xs, ys = [p[0] for p in pos.values()], [p[1] for p in pos.values()]
+            x0, x1, y0, y1 = min(xs) - 40, max(xs) + 40, min(ys) - 20, max(ys) + 20
+            want = max(self.chart_px[0] - margin[0] - margin[1], 50) / max(self.chart_px[1] - margin[2] - margin[3], 50)
+            if (x1 - x0) / (y1 - y0) < want:
+                c, w = (x0 + x1) / 2, want * (y1 - y0)
+                x0, x1 = c - w / 2, c + w / 2
+            else:
+                c, h = (y0 + y1) / 2, (x1 - x0) / want
+                y0, y1 = c - h / 2, c + h / 2
+            for k, (x, y) in enumerate([(x0, y0), (x1, y1)]):
+                data.append({"name": "\u200b" * (k + 1), "x": x, "y": y, "symbolSize": 0, "value": "",
+                             "itemStyle": {"opacity": 0}, "label": {"show": False}, "tooltip": {"show": False},
+                             "emphasis": {"disabled": True}})
         self.chart.options.clear()
         self.chart.options.update({
             "tooltip": {"trigger": "item", "confine": True},
             "animation": False,
             "series": [{"type": "graph", "layout": "none", "roam": True, "data": data, "links": links,
-                        "top": 30, "bottom": 45, "left": 50, "right": 70,
+                        "left": margin[0], "right": margin[1], "top": margin[2], "bottom": margin[3],
                         "edgeSymbol": ["none", "arrow"], "edgeSymbolSize": 8,
                         "lineStyle": {"color": "#8f8d86", "opacity": 0.9},
                         "emphasis": {"focus": "adjacency"}}]})
@@ -617,8 +649,22 @@ class flow_page:
         if e.data_type == "node" and e.name in self.fl.nodes:
             await self.select(e.name)
 
+    async def measure(self):
+        # the chart's size in pixels: the layout is padded to its aspect ratio
+        try:
+            r = await ui.run_javascript("const r = getHtmlElement(%d).getBoundingClientRect(); [r.width, r.height]"
+                                        % self.chart.id, timeout=3.0)
+        except Exception:
+            return False
+        if r and r[0] > 0 and r[1] > 0 and (abs(r[0] - self.chart_px[0]) > 2 or abs(r[1] - self.chart_px[1]) > 2):
+            self.chart_px = (float(r[0]), float(r[1]))
+            return True
+        return False
+
     async def poll(self):
         # the flow file edited elsewhere, or inputs changed
+        if await self.measure():
+            self.draw()
         try:
             m = os.stat(self.file).st_mtime_ns
         except OSError:
