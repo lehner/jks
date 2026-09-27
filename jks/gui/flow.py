@@ -86,6 +86,22 @@ class FlowError(Exception):
     pass
 
 
+_code = None
+
+
+def code_hash():
+    # the jks library (not jks.gui): a changed solver invalidates results like a changed script
+    global _code
+    if _code is None:
+        root = os.path.dirname(os.path.abspath(jks.__file__))
+        h = hashlib.sha256()
+        for p in sorted(glob.glob(os.path.join(root, "*.py"))):
+            h.update(os.path.basename(p).encode())
+            h.update(runner.file_hash(p).encode())
+        _code = h.hexdigest()[:32]
+    return _code
+
+
 class node:
     def __init__(self, id, parent=None, name=None, argv=(), env=None, source=None, meta=None, notes=()):
         # a source node has source (a path) and nothing else
@@ -135,6 +151,7 @@ class flow:
         self.path = os.path.abspath(path)
         self.base = os.path.dirname(self.path)
         self.nodes = {}  # id -> node, in file order
+        self.trailer = []  # comment lines after the last node
 
     # ---- file format ----
     @staticmethod
@@ -171,6 +188,7 @@ class flow:
             meta, notes = None, []
         if meta is not None:
             raise FlowError("%s: #@jks line %s without a command" % (path, meta.get("id")))
+        f.trailer = notes
         return f
 
     def parse_command(self, cmd, meta, notes, where):
@@ -201,6 +219,7 @@ class flow:
             out += n.notes
             out.append("#@jks " + json.dumps(n.meta, sort_keys=True))
             out.append(n.command())
+        out += self.trailer
         return "\n".join(out) + "\n"
 
     def save(self, path=None):
@@ -407,7 +426,7 @@ class engine:
             elif a.kind == "glob":
                 ext[x] = [[os.path.relpath(f, self.flow.base), os.stat(f).st_size, os.stat(f).st_mtime_ns]
                           for f in sorted(glob.glob(self.path(x)))]
-        d = {"script": runner.file_hash(registry.script_path(n.name)), "def": n.definition(),
+        d = {"script": runner.file_hash(registry.script_path(n.name)), "code": code_hash(), "def": n.definition(),
              "inputs": dict((r, keys[r]) for r in n.inputs()), "external": ext}
         return hashlib.sha256(json.dumps(d, sort_keys=True).encode()).hexdigest()[:32]
 
@@ -446,7 +465,13 @@ class engine:
             elif built and self.have(built):
                 bm = self.meta(built)
                 r["status"] = "stale"
-                r["reason"] = "definition changed" if bm and bm.get("def") != n.definition() else "input changed"
+                if bm and bm.get("def") != n.definition():
+                    r["reason"] = "definition changed"
+                elif bm and (bm.get("code") != code_hash() or
+                             bm.get("script") != runner.file_hash(registry.script_path(n.name))):
+                    r["reason"] = "code changed"
+                else:
+                    r["reason"] = "input changed"
             else:
                 r["status"] = "new"
             out.append(r)
@@ -591,7 +616,8 @@ class engine:
     def keep(self, n, key, keys, out, log):
         # store out as a delta to the parent if that reproduces it exactly, else in full
         child = jks.resamples(out)
-        m = {"key": key, "id": n.id, "command": n.command(), "def": n.definition(),
+        m = {"key": key, "id": n.id, "command": n.command(), "def": n.definition(), "code": code_hash(),
+             "script": runner.file_hash(registry.script_path(n.name)),
              "created": str(datetime.datetime.now()), "inputs": dict((r, keys[r]) for r in n.inputs()),
              "log": log}
         base = keys[n.parent] if n.parent else None

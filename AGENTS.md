@@ -159,7 +159,8 @@ scripts/jks_flow       command line for flows (status, run, export, log, add, rm
   generated header defines the helpers, so `bash flow.sh` replays the flow into
   `<flow>.work/files/` (bash 3.2 syntax for macOS; untested there so far) and unsets
   `JKS_*`, `BIN`, `STATS_KEEP_FIXED` like the engine.
-- Keys (Merkle): script file hash, definition (script, parent, argv, env), keys of the
+- Keys (Merkle): script file hash, hash of the jks library sources (jks/*.py, so a solver
+  change marks results "code changed"), definition (script, parent, argv, env), keys of the
   inputs, content hash of sources and external databases, size/mtime of glob files.
   Status: ok / stale (an older result exists; "definition changed" or "input changed") /
   new / failed / missing.  Nothing runs until `jks_flow run`.
