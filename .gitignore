@@ -1,3 +1,4 @@
 dist/
 jks/__pycache__/
 jks_system.egg-info/
+jks/gui/__pycache__/
