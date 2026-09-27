@@ -19,6 +19,7 @@
 #
 import jks, sys, os, math, glob, tempfile, subprocess, numpy
 from scipy.special import erf
+from scipy.stats import chi2 as chi2_dist
 
 if len(sys.argv) < 7:
     print("%s out.pdf in.jks tag t nbins label" % sys.argv[0])
@@ -68,6 +69,14 @@ cmds=cmds+"set style fill empty\n"
 #m=jks.measurements(res1)
 #print m.mean(), m.jackknife().cov(lambda mi: mi.mean())[0][0]**0.5
 #sys.exit(0)
+def plateau_p(values, errors):
+    # constant fit with uncorrelated errors: p-value of the chi^2 (replaces jks.plateau)
+    w = 1.0 / numpy.array(errors)**2
+    v = numpy.array(values)
+    mean = numpy.sum(w * v) / numpy.sum(w)
+    chi2 = float(numpy.sum(w * (v - mean)**2))
+    return { "mean" : mean, "chi2" : chi2, "p" : float(chi2_dist.sf(chi2, len(v) - 1)) }
+
 def ac(m,t,maxdist):
     cnr=[ int(a.split("-")[1]) for a in m.config_tags ]
     c2c={}
@@ -105,11 +114,11 @@ def create_file(tag,t):
     if len(values) > 5:
         print("Max 5")
         for i in range(1,6):
-            print(jk.tags[args[-i]], values[args[-i]])
+            print(m.config_tags[args[-i]], values[args[-i]])
 
         print("Min 5")
         for i in reversed(range(5)):
-            print(jk.tags[args[i]], values[args[i]])
+            print(m.config_tags[args[i]], values[args[i]])
 
 
     #for i in range(len(values)):
@@ -143,7 +152,7 @@ def create_file(tag,t):
         n0=len(values)
         values=values[n0 % nmaxbin:]
         print("Warning: configuration number %d not divisible by %d, remove one" % (n0,nmaxbin))
-        print(jk.tags)
+        print(m.config_tags)
 
     mt=jks.measurements(values)
     mtt=mt
@@ -174,7 +183,7 @@ def create_file(tag,t):
 
             idx=1
             for i in range(parts):
-                print("Part %d / %d = %s" % (i,parts,str(jk.tags[i*ngrp:(i+1)*ngrp])))
+                print("Part %d / %d = %s" % (i,parts,str(m.config_tags[i*ngrp:(i+1)*ngrp])))
                 mtt=mt.subset(range(i*ngrp,(i+1)*ngrp))
                 if blocks != 1:
                     mtt=mtt.block(blocks)
@@ -185,13 +194,13 @@ def create_file(tag,t):
                 idx+=1
 
             f.write("\n\n".encode("utf-8"))
-            fit[(parts,blocks)]=jks.plateau([ x[0] for x in res ], [ [ res[i][1]**2. if i==j else 0.0 for i in range(len(res)) ] for j in range(len(res)) ],
-                                              range(len(res))).fit()
+            fit[(parts,blocks)]=plateau_p([ x[0] for x in res ], [ x[1] for x in res ])
 
     # Now plot autocorrelator for each ensemble
-    ensembles=set([ a.split("-")[0] for a in jks2.tags ])
+    configs=[ a for a in jks2.tags if a[0] != "!" ]
+    ensembles=set([ a.split("-")[0] for a in configs ])
     assert(len(ensembles)==1)
-    cnr=[ int(a.split("-")[1]) for a in jks2.tags ]
+    cnr=[ int(a.split("-")[1]) for a in configs ]
     dists=sorted(list(set([ cnr[i+1] - cnr[i] for i in range(len(cnr)-1) ])))
     maxdist=dists[0]*10
     

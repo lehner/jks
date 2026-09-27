@@ -106,7 +106,7 @@ its page; examples must be runnable on copies of the example databases.
 | tool | what it stores |
 |---|---|
 | `jks_plsa db tag_in w_in w_out omega_grid tag_out [dchi2]` | positivity band (z >= 0); central = band midpoint, stat blocks = band centre per resample at its own record chi, `!band` = sqrt(max(half^2 - stat^2, 0)) |
-| `jks_blsa ... omega_grid tag_lower tag_upper tag_out [dchi2]` | same with a box prior l <= z <= u; l=0, u=inf reproduce `jks_plsa` bit for bit |
+| `jks_blsa ... omega_grid tag_lower tag_upper tag_out [dchi2]` | same with a box prior l <= z <= u; l=0, u=`np.inf` reproduce `jks_plsa` bit for bit (a finite cap such as the `+1e9` of the lqcd `mk` gives the same means but covariances differing at ~5e-11 relative) |
 | `jks_hlt db tag_in w_in w_out omega_grid tag_out lambda [alpha [p]]` | HLT linear estimate g.C and its jackknife blocks g.C^(b); no systematic |
 | `jks_hlt_kernel db tag_in w_in w_out omega_grid list_of_tags_out lambda [alpha [p]]` | the HLT kernels kbar = sum_i g_i e_i on the grid, one tag per output weight |
 | `jks_cor db tag1 t1 tag2 t2` | prints stat, per-variation shifts, combined sys and total correlation |
@@ -140,8 +140,9 @@ The flow machinery (`jks/flow/`, behind `jks_flow` and the GUI's steps) needs on
 core dependencies; `jks/gui/` is installed too but only `jks_gui` needs NiceGUI.
 
 ```
-jks/gui/stats.py       vectorized stat/sys/cov of one tag, no GUI imports (validated
-                       against jks_info and jk.cov()/tcov() to 1e-14)
+jks/gui/stats.py       vectorized stat/sys/cov of one tag, fit bands, distribution checks
+                       of the per-configuration values (no GUI imports; stat/sys/cov
+                       validated against jks_info and jk.cov()/tcov() to 1e-14)
 jks/gui/database.py    read-only database view, cached per path, reload on mtime change
 jks/gui/browser.py     database_view component (tag table, plots, table, correlation,
                        configuration z-scores, info); meant to become the node inspector
@@ -179,6 +180,13 @@ scripts/jks_flow       command line for flows (status, run, export, log, add, rm
   only as `$v`/`${v}` in double-quoted jks_apply arguments.  Keep parameter nodes that
   loops read (`jks_add @ lambda "[...]"`) on a side branch: a loop's key has the values,
   not the value node, so adding a value computes one iteration.
+- Distribution tab (`stats.distribution`, the checks of `jks_plot_dist`): per-configuration
+  values N*mean - (N-1)*block over the configurations a tag was measured on (for primary
+  data the measurements), histogram against the Gaussian, error of the mean from blocks of
+  b configurations divided by the unblocked one (plain standard errors, so ~1 without
+  autocorrelation; jks_plot_dist's B2/B1 uses cov() and is ~1.02 for N=28), consecutive
+  parts with the p-value of a constant, autocorrelation against the configuration-number
+  distance, skewness and excess kurtosis with standard errors, Shapiro-Wilk.
 - Plot nodes: `jks_figure id input jks_plot2|jks_plot out.pdf|- cmd ...` (cmd as for jks_plot2).
   The key has the script, the commands and the input's key but not the output file: the
   pdf is kept in the store (`<key>.pdf`) and copied to `out` (a missing or changed file makes
@@ -270,8 +278,11 @@ scripts/jks_flow       command line for flows (status, run, export, log, add, rm
   plus identical printed tables.
 - Check both code paths where there are two (e.g. HLT double at lambda=0.5, mpmath at
   lambda=1e-4, many inputs with `list(range(4,30))` on the lqcd data).
-- Sanity anchors: at an input time the plsa half-width equals the input error
-  (stat/half = 1.00); an HLT kernel at an input time has A/A0 ~ 1e-12.
+- Sanity anchors: at an input time the plsa band has stat/half = 1.00 and no `!band`
+  shift, and its half-width is close to (not equal to) the input `cov()` error (3.498e-7
+  vs 3.540e-7 at t=14 of the lqcd data, 0.01621 vs 0.01631 at t=1 of fake.jks); an HLT
+  kernel at an input time has A/A0 far below 1 (6e-11 on the lqcd data at lambda=1e-4,
+  1e-16 on fake.jks at lambda=1e-6).
 
 ## Shell pitfalls seen here
 

@@ -427,7 +427,7 @@ class measurements:
                         for i in blocks
                     ]
                 )
-                r.config_tags = [t for t in self.tags]
+                r.config_tags = [self.tags[i] for i in blocks]
                 return r
 
             def bias(self):

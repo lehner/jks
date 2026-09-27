@@ -39,6 +39,9 @@ for i in range(Ntag):
     o_target_rel_err=float(sys.argv[4+3*i])
     jk=res.get(otag)
     tcv = jk.tcov()[itag][itag]
+    if not tcv > 0.0:
+        print("ERROR: %s[%d] does not fluctuate, its variance cannot be scaled" % (otag,itag))
+        sys.exit(1)
     ovar_scale=(jk.mean()[itag] * o_target_rel_err)**2 / tcv
     for j in range(len(jk.blocks)):
         jk.blocks[j][itag] = (jk.blocks[j][itag] - jk.orig[itag])*ovar_scale**0.5 + jk.orig[itag]

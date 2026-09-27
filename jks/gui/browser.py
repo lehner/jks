@@ -157,6 +157,7 @@ class database_view:
                     t_table = ui.tab("Table")
                     t_cor = ui.tab("Correlation")
                     t_out = ui.tab("Configurations")
+                    t_dist = ui.tab("Distribution")
                     t_info = ui.tab("Info")
                     t_scan = ui.tab("Scan") if self.scan else None
                 with ui.tab_panels(tabs, value=t_plot, keep_alive=False).classes("w-full grow"):
@@ -184,6 +185,8 @@ class database_view:
                                  "z = (N-1)(<b> - b_i) / s with s the single-configuration standard deviation"
                                  ).classes("text-xs opacity-70")
                         self.outliers = ui.plotly(go.Figure()).classes("w-full").style("height: calc(%s - 14rem)" % self.height)
+                    with ui.tab_panel(t_dist):
+                        self.build_dist()
                     with ui.tab_panel(t_info):
                         self.info = ui.column().classes("w-full")
                     if t_scan is not None:
@@ -485,7 +488,8 @@ class database_view:
     def update_all(self):
         # only the visible tab is drawn; switching tabs redraws
         {"Plot": self.update_plot, "Table": self.update_table, "Correlation": self.update_cor,
-         "Configurations": self.update_outliers, "Info": self.update_info, "Scan": self.update_scan}[self.tab]()
+         "Configurations": self.update_outliers, "Distribution": self.update_dist, "Info": self.update_info,
+         "Scan": self.update_scan}[self.tab]()
 
     def color(self, tag):
         # a tag keeps its color while selected, independent of selection order
@@ -652,6 +656,76 @@ class database_view:
         else:
             fig.update_layout(**self.layout())
         self.outliers.update_figure(_figure(fig))
+
+    # ---- distribution of the per-configuration values (Gaussianity, as jks_plot_dist) ----
+    def build_dist(self):
+        with ui.row().classes("items-center gap-4"):
+            self.dist_index = ui.number("element", value=0, min=0, step=1, on_change=self.update_dist) \
+                .props("dense").classes("w-28")
+            self.dist_bins = ui.number("bins (0: automatic)", value=0, min=0, step=1, on_change=self.update_dist) \
+                .props("dense").classes("w-40")
+            ui.label("per-configuration values of the active tag: the measurements for primary data, jackknife "
+                     "pseudo-values N<x> - (N-1)x_b for derived tags").classes("text-xs opacity-70")
+        self.dist_info = ui.label().classes("text-sm whitespace-pre-wrap").style("font-family: ui-monospace, monospace")
+        self.dist_box = ui.column().classes("w-full")
+        self.dist_plot = None
+
+    def update_dist(self, e=None):
+        if self.dist_plot is None:
+            # created once the tab panel is displayed (see update_scan)
+            def create():
+                with self.dist_box:
+                    self.dist_plot = ui.plotly(go.Figure()).classes("w-full").style("height: calc(%s - 16rem)" % self.height)
+                self.update_dist()
+            ui.timer(0.3, create, once=True)
+            return
+        from plotly.subplots import make_subplots
+        fig = make_subplots(rows=2, cols=2, horizontal_spacing=0.09, vertical_spacing=0.16,
+                            subplot_titles=("histogram and Gaussian expectation", "error of the mean from blocks / unblocked",
+                                            "consecutive parts (p-value of a constant)", "autocorrelation"))
+        c0, c1, c2 = (SERIES[k][1 if self.dark.value else 0] for k in (0, 1, 2))
+        text = ""
+        if self.active is not None:
+            jk = self.db.res.get(self.active)
+            n = len(np.atleast_1d(jk.orig))
+            k = min(max(int(self.dist_index.value or 0), 0), n - 1)
+            d = stats.distribution(jk.orig, jk.blocks, self.db.tags, k, int(self.dist_bins.value or 0) or None)
+            if "values" not in d:
+                text = "%s: fewer than 4 configurations" % self.active
+            else:
+                ctr = 0.5 * (d["edges"][1:] + d["edges"][:-1])
+                w = np.diff(d["edges"])
+                fig.add_trace(go.Bar(x=ctr, y=d["counts"], width=w, name="configurations", marker_color=c0,
+                                     error_y=dict(type="data", array=np.sqrt(d["counts"]), visible=True)), 1, 1)
+                fig.add_trace(go.Scatter(x=ctr, y=d["expected"], mode="markers+lines", name="Gaussian",
+                                         line=dict(color=c1, width=2, shape="hvh"), marker=dict(size=8)), 1, 1)
+                fig.add_trace(go.Scatter(x=d["block_sizes"], y=d["block_ratios"], mode="lines+markers", name="blocks",
+                                         line=dict(color=c0, width=2), marker=dict(size=8), showlegend=False), 1, 2)
+                fig.add_hline(y=1.0, line=dict(color="#8f8d86", dash="dot"), row=1, col=2)
+                for j, (p, part) in enumerate(sorted(d["parts"].items())):
+                    xs = j * 10 + np.arange(p) * 8.0 / max(p - 1, 1)
+                    fig.add_trace(go.Scatter(x=xs, y=part["means"], mode="markers", name="%d parts" % p,
+                                             marker=dict(size=8, color=(c0, c1, c2)[j % 3]), showlegend=False,
+                                             error_y=dict(type="data", array=part["errors"], visible=True)), 2, 1)
+                    fig.add_annotation(x=j * 10 + 4, xref="x3", y=1.02, yref="y3 domain", showarrow=False,
+                                       text="%d parts: p=%.2g" % (p, part["p"]), font=dict(size=11))
+                fig.add_hline(y=d["mean"], line=dict(color="#8f8d86", dash="dot"), row=2, col=1)
+                if d.get("ac"):
+                    fig.add_trace(go.Scatter(x=d["ac_dist"], y=d["ac"], mode="lines+markers", showlegend=False,
+                                             line=dict(color=c0, width=2), marker=dict(size=8)), 2, 2)
+                    fig.add_hline(y=0.0, line=dict(color="#8f8d86", dash="dot"), row=2, col=2)
+                fig.update_xaxes(title_text="configuration distance", row=2, col=2)
+                fig.update_xaxes(title_text="block size", type="log", row=1, col=2)
+                fig.update_xaxes(showticklabels=False, row=2, col=1)
+                text = ("%s[%d]: N = %d, mean %.8g, width %.4g\n"
+                        "skewness %.3f +- %.3f, excess kurtosis %.3f +- %.3f, Shapiro-Wilk p = %.3g\n"
+                        "extremes (z): %s" % (
+                            self.active, k, d["n"], d["mean"], d["std"], d["skew"], d["skew_err"], d["kurt"],
+                            d["kurt_err"], d["shapiro"],
+                            ", ".join("%s %.2f" % (c, z) for c, v, z in d["extremes"])))
+        fig.update_layout(**self.layout(showlegend=True, bargap=0.02))
+        self.dist_info.text = text
+        self.dist_plot.update_figure(_figure(fig))
 
     # ---- scan of a loop: every iteration's output against the loop value ----
     def build_scan(self):

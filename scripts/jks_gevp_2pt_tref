@@ -25,6 +25,9 @@ if len(sys.argv) < 8:
 
 fout=sys.argv[1]
 fin=sys.argv[2]
+if os.path.exists(fout) and os.path.samefile(fin,fout):
+    print("ERROR: the output database is written from scratch and must not be the input %s" % fin)
+    sys.exit(1)
 ops=sys.argv[3].split(",")
 fmt=sys.argv[4]
 fmtO=sys.argv[5]

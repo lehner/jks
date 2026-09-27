@@ -17,13 +17,15 @@ mapped back with `u_n = V w_n`, and energies, overlaps `c2` (computed with the
 unrotated `C(t)`) and eigenvector components are formed as in `jks_gevp_2pt`, with
 the same nan rules.  Blocks, variations, `jkscale`, `lenient` and
 `STATS_KEEP_FIXED` behave as in `jks_gevp_2pt`.  The output file is written from
-scratch.
+scratch; if `out` exists and is the same file as `in`, the script prints `ERROR: the
+output database is written from scratch and must not be the input <in>` and exits
+with status 1.
 
 ## Arguments
 
 | argument | meaning |
 |---|---|
-| `out` | output database (created/overwritten) |
+| `out` | output database (created/overwritten); must not be `in` |
 | `in` | input database |
 | `ops` | comma-separated operator names |
 | `fmtC` | format with two `%s` for the correlator tags |
@@ -62,7 +64,6 @@ components differ slightly away from `t = tref = 2`.
 - `V` comes from a non-Hermitian eigenproblem and is not orthonormalized, so
   `u_n = V w_n` has unit norm only at `t = tref` (in the example the norm deviates
   from 1 by up to ~5e-4 at other `t`), whereas `jks_gevp_2pt` stores unit vectors.
-- `out == in` replaces the input database by the GEVP tags only.
 - The usage text omits the optional `jkscale` and `lenient` arguments.
 
 ## See also

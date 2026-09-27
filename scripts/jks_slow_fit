@@ -144,16 +144,18 @@ while need_key():
 eps_estimate_hessians=1e-7
 eps_require_appx_precision=2e-2
 
-def qf(rr0,maxit,tol):
+def qf(rr0,maxit,tol,g=None):
+    # g: start values (the frozen parameters at the values of the block), default guess
+    g=guess if g is None else g
     verb=False
-    vfail=[ float("nan") for x in guess ]
-    res=jks.qfit(v_mn,v_cv,rr0,fnccomb,guess,verbose=verb,maxiter=maxit,tolerance=tol,estimate_hessians=eps_estimate_hessians,freeze_index=len(original_guess))
+    vfail=[ float("nan") for x in g ]
+    res=jks.qfit(v_mn,v_cv,rr0,fnccomb,g,verbose=verb,maxiter=maxit,tolerance=tol,estimate_hessians=eps_estimate_hessians,freeze_index=len(original_guess))
     #print res
     if not res["success"] and maxit > 10:
         print("First round did not converge", rr0, tol)
-        improved_guess=res["val"] + guess[len(original_guess):]
+        improved_guess=res["val"] + g[len(original_guess):]
         print("Guess")
-        print(guess)
+        print(g)
         print(" --> ")
         print(improved_guess)
         res=jks.qfit(v_mn,v_cv,rr0,fnccomb,improved_guess,verbose=verb,maxiter=maxit,tolerance=tol,estimate_hessians=eps_estimate_hessians,freeze_index=len(original_guess))
@@ -172,13 +174,15 @@ def fit(c, maxit=10000, tol=default_fit_tol):
         ret.append(qf(r,maxit,tol))
     return ret
 
-def sfit(c, maxit=10000, tol=default_fit_tol):
+def sfit(c, rs, maxit=10000, tol=default_fit_tol):
+    # the frozen parameters (tags used as r[...]) at the values of this block, as in jks_fit
     global v_mn
     v_mn=c
+    g=update_keys(rs,guess)
     ret=[]
 
     for i,r in enumerate(rrcomb):
-        ret = ret + qf(r,maxit,tol)[0]
+        ret = ret + qf(r,maxit,tol,g)[0]
     return ret
 
 def sel(c,j,l):
@@ -286,7 +290,7 @@ for j in range(len(jk.blocks)):
         #break
 
 t0=time.time()
-jk=jks2.apply(lambda r: sfit(r["#.#fit#.#"]))
+jk=jks2.apply(lambda r: sfit(r["#.#fit#.#"],r))
 t1=time.time()
 print("Total fitting took %g s" % (t1-t0))
 

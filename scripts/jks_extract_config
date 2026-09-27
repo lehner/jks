@@ -36,11 +36,11 @@ jks2.compress()
 jk=jks2.get(tag)
 m=jk.scaled_measurements()
 
-if config not in jk.tags:
+if config not in m.config_tags:
     print("%s not measured on %s" % (tag,config))
     sys.exit(1)
 
-ic=jk.tags.index(config)
+ic=m.config_tags.index(config)
 r=m.data[ic]
 for t in range(len(r)):
     print("%d %.15g %.15g" % (t,r[t].real,r[t].imag))

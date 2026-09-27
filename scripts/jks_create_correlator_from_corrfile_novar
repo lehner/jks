@@ -17,7 +17,8 @@
 #    with this program; if not, write to the Free Software Foundation, Inc.,
 #    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 #
-import jks, sys, os, math, glob, corrIO, numpy, fnmatch
+import jks, sys, os, math, glob, numpy, fnmatch
+import jks.corrIO as corrIO
 if len(sys.argv) < 4 or len(sys.argv) % 2 != 0:
     print("%s fn etag1 pat1 [etag2 pat2 ...]" % sys.argv[0])
     sys.exit(0)
@@ -73,10 +74,12 @@ gtag = {}
 
 for ll in range(N):
     
-    fns_ll=glob.glob(pat[ll]) * 2
+    # sorted: the numbering must not depend on the filesystem; configurations are numbered
+    # n .. 2n-1 as in earlier versions (which listed every file twice)
+    fns_ll=sorted(glob.glob(pat[ll]))
 
     # check that projecting config numbers to integers gives a unique mapping
-    tags=[ i for i,f in enumerate(fns_ll) ]
+    tags=[ len(fns_ll) + i for i,f in enumerate(fns_ll) ]
     assert(len(list(set(tags))) == len(fns_ll))
     ida=numpy.argsort(tags)
     fns_ll=(numpy.array(fns_ll)[ida]).tolist()
@@ -85,7 +88,7 @@ for ll in range(N):
     fns = fns + fns_ll
 
     for i,f in enumerate(fns_ll):
-        gtag[f] = "%s-%8.8d" % (etag[ll],i)
+        gtag[f] = "%s-%8.8d" % (etag[ll],len(fns_ll) + i)
 
    
 sorted_fns = sorted(fns, key=lambda f: gtag[f])

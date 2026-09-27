@@ -31,13 +31,15 @@ nan.  A nan norm of `C(t)` or `C(t0)` also gives nan.  The computation is done w
 With `jkscale` the blocks are moved towards the mean by that factor before the
 GEVP and the result is scaled back (`res.apply(..., scale=jkscale)`), a linearization
 for noisy blocks.  The output file is written from scratch (input tags are not
-copied).
+copied); if `out` exists and is the same file as `in` (`os.path.samefile`), the
+script prints `ERROR: the output database is written from scratch and must not be
+the input <in>` and exits with status 1.
 
 ## Arguments
 
 | argument | meaning |
 |---|---|
-| `out` | output database (created/overwritten, contains only the GEVP tags) |
+| `out` | output database (created/overwritten, contains only the GEVP tags); must not be `in` |
 | `in` | input database with the correlator matrix |
 | `ops` | comma-separated operator names |
 | `fmtC` | format with two `%s` for the correlator tags, e.g. `C_%s_%s` |
@@ -70,6 +72,7 @@ entries) and to `t = k - dt` for `dt <= 0` (T+dt entries).
 jks_gevp_2pt gevp.jks corr.jks a,b "C_%s_%s" "gevp.%s" 1
 jks_gevp_2pt gevpm.jks corr.jks a,b "C_%s_%s" "gevp.%s" -2
 STATS_KEEP_FIXED="C_b*" jks_gevp_2pt gevpk.jks corr.jks a,b "C_%s_%s" "gevp.%s" 1
+jks_gevp_2pt corr.jks corr.jks a,b "C_%s_%s" "gevp.%s" 1
 ```
 
 `corr.jks` is a synthetic 2-state database (E = 0.4, 0.8; `<n|O_i|0>` =
@@ -78,12 +81,14 @@ symmetry).  `gevp.jks` gets 14 tags of length 15: `gevp.En-0` ~ 0.40,
 `gevp.En-1` ~ 0.80, `gevp.c2mn-0-0` ~ 1.00, `gevp.c2mn-1-0` ~ 0.25,
 `gevp.c2mn-0-1` ~ 0.36, `gevp.c2mn-1-1` ~ 0.81 and the `cni` tags; with `dt=-2` the
 vectors have 14 entries starting at t=2; `STATS_KEEP_FIXED` keeps `C_b_b` fixed
-(printed as `Translated: ['C_b_b']`) and reduces the errors.
+(printed as `Translated: ['C_b_b']`) and reduces the errors.  The last call
+refuses to overwrite the input (`ERROR: ...`, exit 1) and leaves `corr.jks`
+unchanged.
 
 ## Notes
 
-- `out` is overwritten, not merged: `out == in` replaces the input database by the
-  GEVP tags only.
+- An existing `out` is overwritten, not merged; use `jks_add_from` to combine the
+  GEVP tags with other data.
 - The overall phase/sign of `u_n` is whatever `numpy.linalg.eig` returns; states are
   identified only by ordering the energies.
 - The `.i` parts are zero for real input.
