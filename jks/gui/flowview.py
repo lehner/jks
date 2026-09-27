@@ -315,7 +315,7 @@ class flow_page:
     async def build(self):
         with ui.header().classes("items-center gap-2 py-1"):
             ui.label("jks flow").classes("text-lg font-bold")
-            ui.button(icon="folder_open", on_click=self.pick).props("flat dense color=white").tooltip("open")
+            ui.button(icon="folder_open", on_click=self.pick).props("flat dense color=white").tooltip("open a database or flow")
             ui.label(self.file).classes("text-sm opacity-80 grow truncate")
             self.summary = ui.label().classes("text-sm")
             self.run_btn = ui.button("Run stale", icon="play_arrow", on_click=self.run_stale) \

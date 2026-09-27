@@ -88,7 +88,7 @@ class db_page:
     async def build(self):
         with ui.header().classes("items-center gap-2 py-1"):
             ui.label("jks").classes("text-lg font-bold")
-            ui.button(icon="folder_open", on_click=self.pick).props("flat dense color=white").tooltip("open database")
+            ui.button(icon="folder_open", on_click=self.pick).props("flat dense color=white").tooltip("open a database or flow")
             with ui.button(icon="history").props("flat dense color=white").tooltip("recent databases"):
                 with ui.menu():
                     for p in recent:
@@ -107,8 +107,8 @@ class db_page:
         if not self.file:
             self.reload_btn.disable()
             with self.body:
-                ui.label("Open a database with the folder button, or start jks_gui with file names. "
-                         "Steps that create a new database can be run from the step panel.").classes("m-8")
+                ui.label("Open a database (.jks) or a flow (.sh) with the folder button, or start jks_gui with "
+                         "file names. Steps that create a new database can be run from the step panel.").classes("m-8")
         else:
             await self.load()
         with self.drawer:

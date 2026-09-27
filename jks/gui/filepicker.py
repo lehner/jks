@@ -20,6 +20,18 @@
 #
 import os
 from nicegui import ui
+from jks.flow import core
+
+
+def _kind(e):
+    # what the picker says a file is
+    if e.name.endswith(".jks"):
+        return "database"
+    try:
+        with open(e.path, "rb") as f:
+            return "flow" if core.FORMAT.encode() in f.read(200) else ""
+    except OSError:
+        return ""
 
 
 def _size(n):
@@ -44,6 +56,7 @@ class file_picker(ui.dialog):
             self.table = ui.table(
                 columns=[
                     {"name": "name", "label": "Name", "field": "name", "align": "left", "sortable": True},
+                    {"name": "kind", "label": "Type", "field": "kind", "align": "left", "sortable": True},
                     {"name": "size", "label": "Size", "field": "size", "align": "right"},
                 ],
                 rows=[],
@@ -94,11 +107,16 @@ class file_picker(ui.dialog):
                 is_dir = e.is_dir()
                 if not is_dir and not self.all.value and not e.name.endswith(self.pattern):
                     continue
+                kind = "folder" if is_dir else _kind(e)
+                # shell scripts only if they are flows
+                if e.name.endswith(".sh") and kind != "flow" and not self.all.value:
+                    continue
                 size = "" if is_dir else _size(e.stat().st_size)
             except OSError:
                 continue
             rows.append(
-                {"name": ("📁 " if is_dir else "") + e.name, "size": size, "path": e.path, "dir": is_dir}
+                {"name": ("📁 " if is_dir else "") + e.name, "size": size, "path": e.path, "dir": is_dir,
+                 "kind": kind}
             )
         rows.sort(key=lambda r: not r["dir"])
         self.table.rows = rows
