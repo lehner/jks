@@ -184,14 +184,23 @@ class flow_target:
         msgs, seen = [], {}
         have = set(db.keys()) if db is not None else set()
         for it in its:
+            where = " ".join("%s=%s" % kv for kv in it.items())
+            written = set()  # by the body's earlier commands in this iteration
             for c in n.body:
                 x = c.instance(it)
-                for t in [t for t in x.spec().tags_out(x.values()) if "*" not in t]:
+                outs = [t for t in x.spec().tags_out(x.values()) if "*" not in t]
+                if db is not None:
+                    for t in x.spec().tags_in(x.values()):
+                        if t not in have and t not in written and t not in outs and not \
+                                (n.meta.get("mode") == "sequence" and t in seen):
+                            msgs.append("tag %s not found (%s)" % (t, where))
+                for t in outs:
                     if t in have:
-                        msgs.append("tag %s exists already" % t)
+                        msgs.append("tag %s exists already (%s)" % (t, where))
                     elif t in seen and seen[t] != it:
                         msgs.append("iterations %s and %s both write %s" % (seen[t], it, t))
                     seen.setdefault(t, it)
+                written |= set(outs)
         if not its:
             msgs.append("the loop has no iterations")
         return sorted(set(msgs))[:8]
@@ -211,6 +220,10 @@ class flow_target:
             with ui.row().classes("w-full items-center no-wrap"):
                 ui.label("editing %s %s" % ("loop" if self.loop else "node", self.edit)).classes("text-sm font-bold grow")
                 ui.button("new node instead", on_click=lambda: self.page.start_add()).props("flat dense size=sm")
+            if self.page.fl.nodes[self.edit].kind == "step" and self.parent():
+                # a step can become a loop (same id: nodes reading it keep working)
+                ui.checkbox("turn into a loop: repeat the step for a list of values", value=self.loop is not None,
+                            on_change=lambda e: self.toggle_loop(panel, e.value)).props("dense")
         else:
             p = self.parent()
             ui.label("new node after %s" % p if p else "new node (select a node to start from it)") \
@@ -249,8 +262,8 @@ class flow_target:
                     .tooltip("map: iterations run independently (only for steps that just add tags); "
                              "sequence: one after the other; auto: map when possible")
             self.summary = ui.label().classes("text-xs opacity-80 break-all")
-            ui.label("use %s in the fields below" % ", ".join("$" + v for l in L["levels"] for v in l["vars"])) \
-                .classes("text-xs opacity-70")
+            self.var_hint = ui.label().classes("text-xs opacity-70")
+            self.update_hint()
             with ui.row().classes("items-center gap-1"):
                 ui.label("body:").classes("text-xs")
                 for k, b in enumerate(L["body"]):
@@ -319,8 +332,14 @@ class flow_target:
                       "seq": {"seq": [1, 1, 10]}}[kind])
         panel.render()
 
+    def update_hint(self):
+        names = ["${%s}" % v for l in self.loop["levels"] for v in l["vars"]]
+        self.var_hint.text = "use %s in the fields below" % ", ".join(names)
+
     def set_level(self, panel, l, **kw):
         l.update(kw)
+        if "vars" in kw:
+            self.update_hint()
         panel.refresh_command()
         asyncio.ensure_future(self.update_summary(panel))
 
@@ -464,6 +483,7 @@ class flow_page:
         self.target = flow_target(self)
         self.base = self.fl.base
         self.chart_px = (1500.0, 300.0)  # measured in the browser
+        self.loaded, self.loading = {}, set()  # databases of parent nodes for the step panel
 
     def notify(self, msg, **kw):
         # from a persistent element: the element that triggered an action may be gone by now
@@ -521,9 +541,33 @@ class flow_page:
         return await run.io_bound(load)
 
     def parent_db(self):
-        # database the step panel's form offers tags of (loaded when a node is shown)
+        # database the step panel's form offers tags of and checks against: the node the step
+        # starts from (loaded in the background if it is not the one shown)
         p = self.target.parent()
-        return self.shown_db if p and p == getattr(self, "shown_id", None) else None
+        if not p:
+            return None
+        if p == getattr(self, "shown_id", None):
+            return self.shown_db
+        if p in self.loaded:
+            return self.loaded[p]
+        if p not in self.loading:
+            self.loading.add(p)
+            asyncio.ensure_future(self.load_parent(p))
+        return None
+
+    async def load_parent(self, p):
+        info = self.status.get(p, {})
+        n = self.fl.nodes[p]
+        key = info.get("key") if info.get("status") == "ok" or n.is_source() else info.get("built")
+        try:
+            if key:
+                self.loaded = {p: await self.node_db(self.fl, p, key)}
+        except Exception:
+            pass
+        finally:
+            self.loading.discard(p)
+        if p in self.loaded and self.panel is not None and self.target.parent() == p:
+            self.panel.render()
 
     # ---- layout ----
     async def build(self):
