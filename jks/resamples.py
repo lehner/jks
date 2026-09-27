@@ -43,6 +43,7 @@ class resamples:
         self.N = None
         self.tags = None
         self.info = None
+        self.origin = None
         if fn != None:
             self.load(fn)
 
@@ -228,6 +229,7 @@ class resamples:
             self.info = s["info"]
         else:
             self.info = {}
+        self.origin = s.get("origin", None)
         self._clone_type_str = s["_clone_type_str"]
         fnc = self._clone_type_fnc()
         for f in s["set"]:

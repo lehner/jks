@@ -5,11 +5,12 @@ scripts = glob.glob("scripts/*")
 
 setup(
     name="jks-system",
-    version="1.1.14",
+    version="1.1.15",
     packages=find_packages(),  # Automatically find the packages in the project
     scripts=scripts,  # Include scripts as is
     entry_points={},
-    install_requires=["scipy","lz4","numpy","highspy"],  # List your package dependencies here
+    install_requires=["scipy","lz4","numpy","highspy","mpmath"],  # List your package dependencies here
+    extras_require={"gui": ["nicegui>=3.6", "plotly"]},  # jks_gui
     author="Christoph Lehner",
     author_email="christoph@lhnr.de",
     description="JKS Measurement database system",
