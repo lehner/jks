@@ -26,6 +26,7 @@ from nicegui import run, ui
 import jks
 from jks.flow import registry, runner
 from jks.gui import database
+from jks.gui import docs
 from jks.gui.filepicker import file_picker
 
 MONO = "font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8rem"
@@ -210,6 +211,8 @@ class step_panel:
                             for g in registry.GROUPS for s in registry.SCRIPTS if s.group == g)
                 self.script_sel = ui.select(opts, value=self.name, label="script", with_input=True,
                                             on_change=lambda e: self.set_script(e.value)).classes("grow")
+                ui.button(icon="help_outline", on_click=lambda: docs.show(self.name)).props("flat dense") \
+                    .classes("jks-doc-btn").tooltip("documentation of the script")
             self.help = ui.label().classes("text-xs opacity-70")
             self.extra = ui.column().classes("w-full gap-1")
             self.form = ui.column().classes("w-full gap-1")

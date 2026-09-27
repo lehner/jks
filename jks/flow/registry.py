@@ -205,7 +205,7 @@ SCRIPTS = [
            head=[A("database", "db")], repeat=[A("model", "tag_in")],
            tail=[A("index", "int"), A("weight", "str", "aic, chi2 or flat", default="aic"),
                  A("variation", "str", "name of the model-average variation"), A("tag", "tag_out")]),
-    script("jks_fit", "fit", "Correlated fit; one or several (tag, ranges, function) triples.",
+    script("jks_fit", "fit", "Fit (uncorrelated: diagonal of tcov); one or several (tag, ranges, function) triples.",
            head=[A("database", "db")],
            repeat=[A("tag", "tag_in"), A("ranges", "value", "e.g. range(5,20), or several ranges: [ list(range(i,20)) for i in range(3,8) ]"),
                    A("function", "expr", "of x, p, r, e.g. p[0]*math.exp(-p[1]*x)")],

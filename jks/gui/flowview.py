@@ -26,7 +26,7 @@ import asyncio, glob, os, queue, re, threading, time
 from nicegui import run, ui
 import jks
 from jks.flow import core, registry, runner
-from jks.gui import database, stats
+from jks.gui import database, docs, stats
 from jks.gui.browser import database_view
 from jks.gui.filepicker import file_picker
 from jks.gui.step import MONO, preview_view, step_panel
@@ -593,6 +593,7 @@ class flow_page:
             ui.button(icon="add_box", on_click=self.add_source).props("flat dense color=white").tooltip("add source database")
             ui.button(icon="list", on_click=self.add_list).props("flat dense color=white").tooltip("add list of words")
             ui.button(icon="add_task", on_click=self.start_add).props("flat dense color=white").tooltip("new step")
+            ui.button(icon="menu_book", on_click=docs.index).props("flat dense color=white").tooltip("documentation")
             ui.button(icon="dark_mode", on_click=self.toggle_dark).props("flat dense color=white").tooltip("dark mode")
         self.drawer = ui.right_drawer(value=False).props("width=520 bordered").classes("p-3")
         with ui.column().classes("w-full gap-1"):

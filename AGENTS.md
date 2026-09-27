@@ -93,6 +93,14 @@ New tools should look like `scripts/jks_plsa`:
 - Match the style of the surrounding code; keep comments at the density of
   `jks_plsa`.
 
+## Documentation
+
+`jks/doc/<script>.md` is the reference page of every script (synopsis, arguments,
+output, environment, tested examples, notes); `jks/doc/index.md` groups them.
+`jks_gui` shows them (`?` next to a script, book icon in the header); they are
+installed as package data.  When a script's arguments or behaviour change, update
+its page; examples must be runnable on copies of the example databases.
+
 ## Spectral tools
 
 | tool | what it stores |

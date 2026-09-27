@@ -21,7 +21,7 @@
 import argparse, glob, http.cookies, os, re, secrets, sys, urllib.parse
 from nicegui import app, run, ui
 from jks.flow import runner
-from jks.gui import database, history
+from jks.gui import database, docs, history
 from jks.gui.browser import database_view
 from jks.gui.filepicker import file_picker
 from jks.gui.step import MONO, preview_view, step_panel
@@ -101,6 +101,7 @@ class db_page:
             if self.file:
                 ui.button(icon="account_tree", on_click=self.new_flow) \
                     .props("flat dense color=white").tooltip("new flow from this database")
+            ui.button(icon="menu_book", on_click=docs.index).props("flat dense color=white").tooltip("documentation")
             ui.button(icon="dark_mode", on_click=self.toggle_dark).props("flat dense color=white").tooltip("dark mode")
         self.drawer = ui.right_drawer(value=False).props("width=520 bordered").classes("p-3")
         self.body = ui.column().classes("w-full")

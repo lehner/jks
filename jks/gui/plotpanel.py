@@ -22,6 +22,7 @@
 import os, re
 from nicegui import ui
 from jks.flow import core
+from jks.gui import docs
 
 MONO = "font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8rem"
 
@@ -171,6 +172,8 @@ class plot_panel:
                     .props("dense").classes("grow")
                 ui.select(list(core.PLOTTERS), value=self.script, on_change=lambda e: setattr(self, "script", e.value)) \
                     .props("dense").classes("w-28")
+                ui.button(icon="help_outline", on_click=lambda: docs.show(self.script)).props("flat dense") \
+                    .tooltip("the plot commands")
             with ui.row().classes("w-full items-center no-wrap gap-1"):
                 ui.checkbox("save to disk", value=self.save, on_change=lambda e: self.set_save(e.value)).props("dense")
                 self.out_in = ui.input("file (relative to the flow)", value=self.out,
