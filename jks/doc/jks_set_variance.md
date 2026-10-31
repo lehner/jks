@@ -46,6 +46,9 @@ convention (29 configurations in `data.jks`). The second prints
 
 ## Notes
 
+- Refused with `JKS_BIN` set (`ERROR`, exit 1): the target error would refer to the
+  binned covariance only (see `JKS_BIN`).
+
 - The target is defined with `tcov()` (the `cov()` convention), so `jks_info`
   reports a relative error smaller by `sqrt((N-1)/N)`.
 - Stat and variation parts are scaled by the same factor; their ratio is kept.

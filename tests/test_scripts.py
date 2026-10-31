@@ -95,6 +95,21 @@ def test_dump_corrs(tmp_path):
 
 
 # ---- small tools ----
+def test_info_closed_pipe(db):
+    # the reader closes the pipe before jks_info writes (as head -1 may): exit 0, no traceback
+    import subprocess, sys
+    from conftest import env, SCRIPTS
+    for unbuffered in ("1", ""):
+        e = env()
+        e["PYTHONUNBUFFERED"] = unbuffered
+        for args in (["C"], ["C", "1"], []):
+            p = subprocess.Popen([sys.executable, os.path.join(SCRIPTS, "jks_info"), db] + args, env=e,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            p.stdout.close()
+            err = p.stderr.read().decode()
+            assert p.wait() == 0 and err == "", (args, unbuffered, err)
+
+
 def test_info_zero_element(db):
     r = load(db)
     jk = r.get("C")

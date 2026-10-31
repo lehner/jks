@@ -25,6 +25,14 @@
 import pickle, sys, numpy, math, os
 import lz4.frame
 
+# a reader that stops early (jks_info ... | head -1) is not an error: exit quietly with status 0
+def closed_pipe(t, v, tb):
+    if issubclass(t, BrokenPipeError):
+        os._exit(0)
+    sys.__excepthook__(t, v, tb)
+
+sys.excepthook = closed_pipe
+
 # Treat special case of single element
 def mka(a):
     if type(a)==type([]):
@@ -78,6 +86,10 @@ def format(value,errors,etags,force_no_digits_shift=False):
     return s
 
 # Main logic
+if "BIN" in os.environ:
+    print("ERROR: BIN is no longer supported, use JKS_BIN (see jks_info documentation)")
+    sys.exit(1)
+
 if len(sys.argv) > 1:
     fn=sys.argv[1]
 
@@ -97,29 +109,16 @@ if len(sys.argv) > 1:
         vars = dict([ (v,mka((numpy.cov(m=[ numpy.array(p["set"][tag]["blocks"][p["tags"].index("!"+v)]), mean ],rowvar=0, ddof=1)*2.0).tolist())) for v in var_tags ])
         n=len(stat_blocks)
         if n > 0:
-            if "BIN" in os.environ:
-                m=int(os.environ["BIN"])
-                n -= n % m
-                assert n % m == 0
-                
-                sys.stderr.write(f"# bin {m} configurations: {[conf_tags[i*m:(i+1)*m] for i in range(n//m)]}\n")
-                
-                # first construct resamples
-                cyclic_average = True
-
-                if not cyclic_average:
-                    rec_stat_blocks = [ (n-m)/m/(n//m-1)*numpy.sum(stat_blocks[i*m:(i+1)*m],axis=0) for i in range(n//m) ]
-                    rec_stat_cov=mka(((n//m-1)**2.0/(n//m)*numpy.cov(m=rec_stat_blocks, rowvar=0, ddof=1)).tolist())
-                    stat_cov = rec_stat_cov
-                else:
-                    # something goes wrong here
-                    a = []
-                    for ic in range(m):
-                        stat_blocks_cycled = numpy.roll(stat_blocks, ic, axis=0)
-                        rec_stat_blocks = [ (n-m)/m/(n//m-1)*numpy.sum(stat_blocks_cycled[i*m:(i+1)*m],axis=0) for i in range(n//m) ]
-                        rec_stat_cov=mka(((n//m-1)**2.0/(n//m)*numpy.cov(m=rec_stat_blocks, rowvar=0, ddof=1)).tolist())
-                        a.append(rec_stat_cov)
-                    stat_cov = numpy.mean(a, axis=0)                
+            R = None
+            if "JKS_BIN" in os.environ:
+                import jks.binning
+                try:
+                    R = jks.binning.rows(mean, p["set"][tag]["blocks"], p["tags"], convention="info")
+                except ValueError as e:
+                    print("ERROR: %s" % e)
+                    sys.exit(1)
+            if R is not None:
+                stat_cov=(R.T @ R).tolist()
             else:
                 stat_cov=mka(((n-1)**2.0/n*numpy.cov(m=stat_blocks, rowvar=0, ddof=1)).tolist())
         else:
@@ -157,6 +156,21 @@ if len(sys.argv) > 1:
             print("--------------------------------------------------------------------------------")
         print("%d configs:" % len(conf_tags))
         print(conf_tags)
+        if "JKS_BIN" in os.environ:
+            import jks.binning
+            try:
+                d = jks.binning.describe(p["tags"])
+            except ValueError as e:
+                print("ERROR: %s" % e)
+                sys.exit(1)
+            if d is not None:
+                print("--------------------------------------------------------------------------------")
+                print("JKS_BIN=%s, JKS_BIN_MODE=%s:" % (os.environ["JKS_BIN"], d[1]))
+                if "JKS_BIN_POOL" in os.environ:
+                    print("JKS_BIN_POOL=%s" % os.environ["JKS_BIN_POOL"])
+                for name, n, m, matched, pop in d[0]:
+                    print("- stream %s%s: %d configs, bin %d%s" % (name if name != "" else '""',
+                          " (pool %s)" % "+".join(pop) if len(pop) > 1 else "", n, m, "" if matched else " (no match)"))
         if len(var_tags) > 0:
             print("--------------------------------------------------------------------------------")
         for f in var_tags:
@@ -175,3 +189,5 @@ else:
     print("With single argument, print correlator with statistical, systematic, and errors combined in quadrature")
     print("With two arguments list value and all errors in LaTeX usable format")
 
+# flush here, where a closed pipe still reaches closed_pipe (not at interpreter exit)
+sys.stdout.flush()

@@ -45,11 +45,12 @@ quadrature sum over all variations. Read only.
 
 - `JKS_INFO_HUMAN_READABLE`: if set (any value), the `tag` mode prints the
   compact `value(err)` format.
-- `BIN=m`: in the tag modes, rebin the jackknife blocks into bins of m
-  consecutive configurations (in the database's tag order) before the stat
-  error; the trailing n mod m configurations are dropped; the error is averaged
-  over the m cyclic shifts of the configuration order. The bins are listed on
-  stderr (`# bin m configurations: ...`).
+- `JKS_BIN`, `JKS_BIN_MODE`, `JKS_BIN_POOL`: stat errors of the tag modes from the delete-bin
+  jackknife (see `JKS_BIN`), per population in the bias-free convention (Nb-1)/Nb;
+  the streams and their bin sizes are reported on stderr.  The overview lists
+  every stream with its number of configurations, bin size and pool.  Errors of the
+  setting print `ERROR: JKS_BIN: ...` (exit 1).
+- `BIN`: no longer supported; refused with an error (use `JKS_BIN`).
 
 ## Examples
 
@@ -68,11 +69,13 @@ On `fake.jks`: the overview shows 40 configs, variation `band` and the tags;
 `0 5.0(0.7)_{stat}(3.1)_{sys}`.
 
 ```bash
-BIN=2 jks_info data.jks C 14
+JKS_BIN=2 jks_info jks/48VF3fh-1.jks w0
+JKS_BIN=48VF3fh-1:2 jks_info global.jks
 ```
 
-On the lattice data (29 configurations, 14 bins of 2, the last configuration
-dropped): 3.771e-07 instead of 3.478e-07 unbinned.
+On `48VF3fh-1` of the ensembles project (22 configurations): stat error of w0
+0.0149226 (bins of 2, averaged over both offsets) instead of 0.0120075; stderr
+`# JKS_BIN 48VF3fh-1: 22 configs, bin 2 (10-11 bins, offsets)`.
 
 ## Notes
 
@@ -81,12 +84,16 @@ dropped): 3.771e-07 instead of 3.478e-07 unbinned.
   measured (block = mean, e.g. the other ensemble of a merged database).
 - An element with value exactly 0 is formatted with the digits of its error,
   like a small value, e.g. `0.0(1.3)_{stat} \times 10^{-2}`.
-- The `BIN` cyclic-average branch carries the source comment "something goes
-  wrong here"; treat binned errors with care.
+- The former `BIN` branch underestimated binned errors (missing factor
+  (n-1)/(n-m) of the delete-bin shift); `JKS_BIN` replaces it.
+- Without `JKS_BIN` the file is read without the `jks` library; with it,
+  `jks.binning` is imported.
 - Missing tags raise `KeyError`, out-of-range elements `IndexError`.
+- A reader that closes the pipe early (`jks_info db C 1 | head -1`) is not an error:
+  jks_info exits quietly with status 0 (also under `set -o pipefail`).
 - The usage text calls `tag` and `tag element` "single argument" and "two
   arguments" (counted after the file name).
 
 ## See also
 
-`jks_cor`, `jks_values`, `jks_plot2`, `jks_dump_blocks`
+`JKS_BIN`, `jks_cor`, `jks_values`, `jks_plot2`, `jks_dump_blocks`

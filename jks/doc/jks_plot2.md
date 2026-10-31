@@ -86,7 +86,7 @@ is 0.  Without `-k`, `out.pdf.input/` is removed.
 
 | variable | meaning |
 |---|---|
-| `BIN` | integer `m`: statistical errors of `c`, `e`, `b` recomputed from jackknife blocks binned in groups of `m` (averaged over cyclic shifts); systematic part kept.  Prints `BIN by m` |
+| `JKS_BIN`, `JKS_BIN_MODE`, `JKS_BIN_POOL` | statistical errors from the delete-bin jackknife (see `JKS_BIN`), through `cov()`/`tcov()`; systematic part unchanged.  The former `BIN` is refused with an error |
 
 Dependencies: numpy, the `jks` package and matplotlib (with fontTools); nothing
 external.  Fonts: the first available of Nimbus Sans, Helvetica, Arial, Liberation

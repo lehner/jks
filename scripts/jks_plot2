@@ -56,6 +56,10 @@ from matplotlib.text import Text
 from matplotlib.textpath import TextToPath, TextPath
 from matplotlib.font_manager import FontProperties, fontManager, findSystemFonts
 
+if "BIN" in os.environ:
+    print("ERROR: BIN is no longer supported, use JKS_BIN (see jks.binning)")
+    sys.exit(1)
+
 argv = [x for x in sys.argv]
 keep = False
 force = True
@@ -121,54 +125,6 @@ def create_file(tag):
     cv = jk.cov()
     tcv = jk.tcov()
     f = NamedTemporaryFile()
-
-    if "BIN" in os.environ:
-
-        cv_sys = numpy.array(tcv) - numpy.array(cv)
-
-        # Treat special case of single element
-        def mka(a):
-            if type(a) == type([]):
-                return a
-            return [[a]]
-
-        # delayed binning done here
-        mean = numpy.array(jk.orig)
-        stat_blocks = [
-            numpy.array(jk.blocks[i]) - mean
-            for i in range(len(jk.tags))
-            if jk.tags[i][0] != "!"
-        ]
-        n = len(stat_blocks)
-
-        m = int(os.environ["BIN"])
-        n -= n % m
-        assert n % m == 0
-
-        print("BIN by", m)
-
-        a = []
-        for ic in range(m):
-            stat_blocks_cycled = numpy.roll(stat_blocks, ic, axis=0)
-            rec_stat_blocks = [
-                (n - m)
-                / m
-                / (n // m - 1)
-                * numpy.sum(stat_blocks_cycled[i * m : (i + 1) * m], axis=0)
-                for i in range(n // m)
-            ]
-            rec_stat_cov = mka(
-                (
-                    (n // m - 1) ** 2.0
-                    / (n // m)
-                    * numpy.cov(m=rec_stat_blocks, rowvar=0, ddof=1)
-                ).tolist()
-            )
-            a.append(rec_stat_cov)
-        cv_stat = numpy.mean(a, axis=0)
-
-        cv = cv_stat
-        tcv = cv_sys + cv_stat
 
     for i in range(len(mn)):
         f.write(

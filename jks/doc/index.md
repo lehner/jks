@@ -74,6 +74,12 @@ Reference pages of the command-line tools; `jks_gui` shows them with the `?` but
 | [`jks_plot`](jks_plot.md) | Plots tags of a jks database with gnuplot into a (multi-page) PDF, driven by a list of short plot commands. |
 | [`jks_plot_dist`](jks_plot_dist.md) | Diagnostic plots (histogram, binning, sub-sample and autocorrelation checks) of the per-configuration distribution of one element of a tag. |
 
+## Settings
+
+| page | |
+|---|---|
+| [`JKS_BIN`](JKS_BIN.md) | Delete-bin jackknife estimate of the statistical covariance (autocorrelation studies), per ensemble, without storing binned data. |
+
 ## Flows and GUI
 
 | script | |

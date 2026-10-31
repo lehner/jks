@@ -25,6 +25,7 @@
 #
 import fnmatch, re
 import numpy as np
+from jks import binning
 
 CONVENTIONS = ("info", "cov")
 
@@ -46,6 +47,9 @@ class tag_stats:
                 self.D *= np.sqrt((self.n_stat - 1) / self.n_stat)
         else:
             self.D = np.zeros((0, n))
+        R = binning.rows(orig, blocks, tags, convention=convention)  # JKS_BIN, if set
+        if R is not None:
+            self.D = R
         self.shifts = dict(
             (tags[i][1:], B[i] - self.mean) for i in np.flatnonzero(is_var)
         )

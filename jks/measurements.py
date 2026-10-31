@@ -21,6 +21,7 @@ import random
 import numpy
 import sys
 import copy
+import jks.binning
 
 
 #
@@ -436,8 +437,13 @@ class measurements:
                     numpy.array(m.mean(), measurements.np_datatype) * (m._NR - 1)
                 ).tolist()
 
-            def cov(self, var=None):
+            def cov(self, var=None, bin=None, mode=None):
+                # bin, mode: delete-bin estimate of the stat part (jks.binning); JKS_BIN and
+                # JKS_BIN_MODE override them, unset means the ordinary delete-one jackknife
                 if var == None:
+                    res = jks.binning.cov(self.orig, self.blocks, self.tags, bin, mode)
+                    if res is not None:
+                        return res
                     # return ((self.N-1)**2.0/self.N*numpy.array(self.measurements().cov(), measurements.np_datatype)).tolist(), this one is correct and bias free for primary observables
                     sm = self.measurements()
                     if sm._NR == 0:
@@ -466,8 +472,8 @@ class measurements:
                     res = [[res]]
                 return res
 
-            def tcov(self):
-                res = numpy.array(self.cov())
+            def tcov(self, bin=None, mode=None):
+                res = numpy.array(self.cov(None, bin, mode))
                 for v in self.vars():
                     res = res + numpy.array(self.cov(v))
                 res = res.tolist()

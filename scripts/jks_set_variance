@@ -29,6 +29,10 @@ if len(sys.argv) < 5 or (len(sys.argv)-5) % 3 != 0:
 
 Ntag=1 + (len(sys.argv) - 5) // 3
 
+if os.environ.get("JKS_BIN", "").strip() != "":
+    print("ERROR: JKS_BIN is set; the target error would refer to the binned covariance only")
+    sys.exit(1)
+
 fno=sys.argv[1]
 
 res=jks.resamples(fno)

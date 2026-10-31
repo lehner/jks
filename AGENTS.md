@@ -9,6 +9,7 @@ test changes.  The mathematics of the positivity tools is documented in the note
 
 ```
 jks/                  library (imported as `jks`)
+  binning.py          delete-bin jackknife covariance (JKS_BIN)
   resamples.py        the database object: jks.resamples(file)
   measurements.py     jackknife objects: mean(), cov(), tcov(), addvar(), vars()
   positive_laplace.py exact positivity bands (solver behind jks_plsa)
@@ -59,6 +60,18 @@ smaller by sqrt((N-1)/N) than those from `cov()` (e.g. 0.5186 vs 0.5253 for N=20
 Correlations are unaffected.  The note (its jackknife covariance equation and footnote)
 documents the `cov()` convention.  Do not "fix" either side without the owner's
 decision: it changes every stored error.
+
+### Binning (`JKS_BIN`)
+
+`jks/binning.py`: delete-bin jackknife estimate of the stat covariance from the stored
+delete-one blocks, used by `cov(var=None, bin=None, mode=None)` / `tcov(bin=None, mode=None)`,
+`jks_info` and `jks/gui/stats.py`.  `JKS_BIN` (`m` or `pattern:m,...` per stream = config tag
+prefix before the last `-`) overrides `bin=`, `JKS_BIN_MODE` (`offsets` default, `single`,
+`overlap`) overrides `mode=`.  Unset, `cov()` is untouched.  Streams are separate jackknifes
+(merged ensembles) unless `JKS_BIN_POOL=ensA+ensB,...` declares a pooled import (one
+jackknife over several streams); a per-tag check warns about undeclared or wrong pools.  Reports go to stderr once per
+stream and process, with a typo warning; reference page `jks/doc/JKS_BIN.md`.  Code that
+computes errors from `.blocks` directly must go through `jks.binning.rows` (or `cov()`).
 
 ## Script conventions
 

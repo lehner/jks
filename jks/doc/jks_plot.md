@@ -90,7 +90,7 @@ Without `-k`, `out.pdf.input/` is removed at the end.
 
 | variable | meaning |
 |---|---|
-| `BIN` | integer `m`: for `c`, `e` and `b`, the statistical error is recomputed after binning the jackknife blocks in groups of `m` (averaged over the `m` cyclic shifts); the systematic part `tcov()-cov()` is kept.  Prints `BIN by m` |
+| `JKS_BIN`, `JKS_BIN_MODE`, `JKS_BIN_POOL` | statistical errors from the delete-bin jackknife (see `JKS_BIN`), through `cov()`/`tcov()`; the systematic part is unchanged.  The former `BIN` is refused with an error |
 
 External programs: `gnuplot` (with the `pdfcairo` terminal), `pdfcrop`, `exiftool`,
 and `bash` for the generated `make` script.
